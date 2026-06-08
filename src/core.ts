@@ -64,6 +64,8 @@ export interface ContextBundle {
   resume?: ResumeState;
   readiness?: ReadinessState;
   snapshot?: TaskSnapshot;
+  research?: ResearchState;
+  info?: string;
   upstreamReport?: UpstreamSyncReport;
   content: string;
 }
@@ -120,7 +122,26 @@ export interface TaskSnapshot {
   readiness: ReadinessState;
   recentEvents: ResumeState["recentEvents"];
   touchedFiles: string[];
+  research?: ResearchState;
+  info?: string;
   handoff?: string;
+}
+
+export interface ResearchItem {
+  id: string;
+  timestamp: string;
+  source?: string;
+  summary: string;
+  details?: string;
+}
+
+export interface ResearchState {
+  taskId: string;
+  updatedAt: string;
+  generatedFrom?: string;
+  openQuestions: string[];
+  decisions: string[];
+  items: ResearchItem[];
 }
 
 export interface ProjectOverviewTask {
@@ -323,9 +344,11 @@ const DEFAULT_CHECKPOINTS: Checkpoint[] = [
 ];
 
 const CODE_WORK_PATTERNS = [
-  /\b(add|build|change|create|debug|delete|fix|implement|install|integrate|modify|refactor|remove|repair|update)\b/i,
-  /帮我.*(写|做|改|修|加|删|开发|实现|集成|安装|移除|重构|清理)/,
-  /(写|做|改|修|加|删|开发|实现|集成|安装|移除|重构|清理).*(代码|插件|功能|项目|文件|配置)/,
+  /\b(add|build|change|check|create|debug|delete|diagnose|fix|implement|inspect|install|integrate|modify|refactor|remove|repair|scan|test|troubleshoot|update|verify)\b/i,
+  /\b(bug|code|config|error|file|hook|plugin|project|test|workflow)\b.*\b(broken|failing|issue|not working|problem|trigger)\b/i,
+  /\b(broken|failing|issue|not working|problem|trigger)\b.*\b(bug|code|config|error|file|hook|plugin|project|test|workflow)\b/i,
+  /帮我.*(写|做|改|修|加|删|开发|实现|集成|安装|移除|重构|清理|检查|排查|查找|扫描|分析|审查|定位|验证|测试|补充|完善)/,
+  /(写|做|改|修|加|删|开发|实现|集成|安装|移除|重构|清理|检查|排查|查找|扫描|分析|审查|定位|验证|测试|补充|完善).*(代码|插件|功能|项目|文件|配置|hook|硬编码|bug|错误|问题|测试|流程)/,
 ];
 
 const QUESTION_ONLY_PATTERNS = [
@@ -346,6 +369,19 @@ const VERIFY_COMMAND_PATTERNS = [
   /\bmvn\s+test\b/i,
   /\bmake\s+(test|check|lint)\b/i,
   /\bomp\s+plugin\s+doctor\b/i,
+];
+
+const IMPLEMENTATION_TOOL_NAMES = new Set(["delete", "edit", "move", "write"]);
+const COMMAND_TOOL_NAMES = new Set(["bash", "cmd", "powershell", "shell", "shell_command", "terminal"]);
+
+const MUTATING_COMMAND_PATTERNS = [
+  /\b(apply_patch|git\s+apply|patch)\b/i,
+  /\b(Set-Content|Add-Content|Out-File|New-Item|Remove-Item|Move-Item|Copy-Item|Rename-Item)\b/i,
+  /\b(cat|echo|printf)\b[\s\S]{0,200}>\s*[^\s&|]+/i,
+  /\b(rm|mv|cp|mkdir|touch)\b/i,
+  /\b(bun|npm|pnpm|yarn)\s+(add|install|remove|uninstall)\b/i,
+  /\b(pip|pipx|uv|poetry)\s+(add|install|remove|uninstall)\b/i,
+  /\b(cargo|go)\s+(add|get|install|mod\s+tidy)\b/i,
 ];
 
 const DEFAULT_UPSTREAM_SOURCES: UpstreamSource[] = [
@@ -418,15 +454,15 @@ const DEFAULT_UPSTREAM_CAPABILITIES: UpstreamCapability[] = [
     id: "research-artifacts",
     title: "Research and implementation evidence packs",
     upstreams: ["ecc"],
-    localStatus: "partial",
+    localStatus: "covered",
     risk: "low",
     localImplementation: [
       "Project Flow writes PRD, handoff, resume, readiness, snapshot, and verification strategy files.",
-      "There is no separate research/info artifact yet.",
+      "Project Flow writes research/research.json, research/notes.md, and info.md for each task.",
+      "Research artifacts are linked from task snapshots, hidden context, and spec proposals.",
     ],
     nextActions: [
-      "Add research.md or info.md for source notes and decisions.",
-      "Link research artifacts from snapshots and spec proposals.",
+      "Watch ECC/Superpowers patterns for richer research sections and source extraction.",
     ],
   },
   {
@@ -556,6 +592,23 @@ export function isCodeWorkPrompt(prompt: string): boolean {
     return false;
   }
   return CODE_WORK_PATTERNS.some(pattern => pattern.test(trimmed));
+}
+
+export function shouldInferTaskFromTool(data: { toolName: string; args?: unknown; resultSummary?: string }): boolean {
+  if (IMPLEMENTATION_TOOL_NAMES.has(data.toolName)) return true;
+  if (isVerificationToolCall(data)) return true;
+  if (!COMMAND_TOOL_NAMES.has(data.toolName)) return false;
+  const command = extractCommand(data.args);
+  if (!command) return false;
+  return MUTATING_COMMAND_PATTERNS.some(pattern => pattern.test(command));
+}
+
+export function inferTaskPromptFromTool(data: { toolName: string; args?: unknown; resultSummary?: string }): string {
+  const command = extractCommand(data.args);
+  const files = extractFilePaths(data.args).slice(0, 4);
+  const target = files.length > 0 ? ` touching ${files.join(", ")}` : "";
+  if (command) return `Continue Project Flow for ${data.toolName}: ${summarizeUnknown(command, 140)}`;
+  return `Continue Project Flow for ${data.toolName}${target}`;
 }
 
 export function safeSlug(input: string): string {
@@ -719,6 +772,84 @@ export async function readTaskEvents(root: string, taskId: string): Promise<Task
     }
   }
   return events;
+}
+
+export async function readTaskResearch(root: string, taskId: string): Promise<ResearchState | undefined> {
+  const researchPath = path.join(getProjectPaths(root).tasksDir, taskId, "research", "research.json");
+  if (!(await pathExists(researchPath))) return undefined;
+  try {
+    const parsed = JSON.parse(await readFile(researchPath, "utf8")) as Partial<ResearchState>;
+    if (typeof parsed.taskId !== "string" || typeof parsed.updatedAt !== "string") return undefined;
+    return {
+      taskId: parsed.taskId,
+      updatedAt: parsed.updatedAt,
+      generatedFrom: typeof parsed.generatedFrom === "string" ? parsed.generatedFrom : undefined,
+      openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions.filter(item => typeof item === "string") : [],
+      decisions: Array.isArray(parsed.decisions) ? parsed.decisions.filter(item => typeof item === "string") : [],
+      items: Array.isArray(parsed.items) ? parsed.items.filter(isResearchItem) : [],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+export async function readTaskInfo(root: string, taskId: string): Promise<string | undefined> {
+  const infoPath = path.join(getProjectPaths(root).tasksDir, taskId, "info.md");
+  if (!(await pathExists(infoPath))) return undefined;
+  return readFile(infoPath, "utf8");
+}
+
+export async function addTaskResearchNote(
+  root: string,
+  taskId: string,
+  note: string,
+  source = "manual",
+): Promise<ResearchState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const now = new Date().toISOString();
+  const existing = await readTaskResearch(root, taskId);
+  const researchPath = path.join(getProjectPaths(root).tasksDir, taskId, "research", "research.json");
+  if (!existing && await pathExists(researchPath)) return undefined;
+  const state = existing || createResearchState(taskId, [], now, "created_from_note");
+  const trimmed = note.trim();
+  if (!trimmed) return state;
+  const id = `R${state.items.length + 1}`;
+  state.items.push({
+    id,
+    timestamp: now,
+    source,
+    summary: trimmed.split(/\r?\n/)[0]?.slice(0, 180) || "Research note",
+    details: trimmed,
+  });
+  state.updatedAt = now;
+  state.generatedFrom = "research_note";
+  await writeResearchFiles(root, task, state);
+  await appendTaskEvent(root, task.id, {
+    type: "research_added",
+    timestamp: now,
+    data: { id, source, summary: state.items.at(-1)?.summary },
+  });
+  await writeTaskInfo(root, task, "research_added");
+  return state;
+}
+
+export async function writeTaskInfo(root: string, task: TaskState, reason = "update"): Promise<string> {
+  const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
+  await mkdir(taskDir, { recursive: true });
+  const infoPath = path.join(taskDir, "info.md");
+  const existing = await readTaskInfo(root, task.id);
+  if (existing !== undefined) return existing;
+  const currentTask = await loadTask(root, task.id) || task;
+  const [acceptance, plan, verificationStrategy, research] = await Promise.all([
+    readAcceptance(root, currentTask.id),
+    readPlan(root, currentTask.id),
+    readVerificationStrategy(root, currentTask.id),
+    readTaskResearch(root, currentTask.id),
+  ]);
+  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, reason);
+  await writeFile(infoPath, content, "utf8");
+  return content;
 }
 
 export async function readTaskResume(root: string, taskId: string): Promise<ResumeState | undefined> {
@@ -1085,6 +1216,7 @@ export async function createTask(root: string, prompt: string): Promise<TaskStat
   await writePlan(root, id, plan);
   await writeFile(path.join(taskDir, "verification.json"), `${JSON.stringify({ checks: [], updatedAt: now }, null, 2)}\n`, "utf8");
   await refreshVerificationStrategy(root, id);
+  await writeInitialTaskResearch(root, task, prd, now);
   await writeFile(paths.activeTaskPath, `${JSON.stringify({ id, updatedAt: now }, null, 2)}\n`, "utf8");
   await appendTaskEvent(root, id, { type: "task_created", timestamp: now, data: { prompt } });
   await writeTaskHandoff(root, task, "created");
@@ -1153,13 +1285,21 @@ export async function recordToolEvent(
   kind: "tool_start" | "tool_end",
   data: { toolName: string; toolCallId?: string; args?: unknown; isError?: boolean; resultSummary?: string },
 ): Promise<void> {
-  const task = await loadActiveTask(root);
-  if (!task || task.status !== "active") return;
+  let task = await loadActiveTask(root);
+  if (!task || task.status !== "active") {
+    if (kind !== "tool_end" || !shouldInferTaskFromTool(data)) return;
+    task = await createTask(root, inferTaskPromptFromTool(data));
+    await appendTaskEvent(root, task.id, {
+      type: "task_inferred",
+      timestamp: new Date().toISOString(),
+      data: { reason: "tool_activity", toolName: data.toolName, toolCallId: data.toolCallId },
+    });
+  }
   if (kind === "tool_end") {
     task.counters.toolCalls += 1;
     if (data.isError) task.counters.failedToolCalls += 1;
     const verification = isVerificationToolCall(data);
-    if (["edit", "write", "bash"].includes(data.toolName) || verification) {
+    if (shouldInferTaskFromTool(data) || verification) {
       task.phase = verification ? "verifying" : "implementing";
       task.checkpoints = task.checkpoints.map(checkpoint =>
         checkpoint.id === "implement" ? { ...checkpoint, done: true } :
@@ -1440,6 +1580,7 @@ export async function writeTaskHandoff(root: string, task: TaskState, reason = "
   const strategy = await readVerificationStrategy(root, task.id);
   const content = formatTaskHandoff(task, verification, acceptance, plan, strategy, reason);
   await writeFile(path.join(taskDir, "handoff.md"), content, "utf8");
+  await writeTaskInfo(root, task, reason);
   await writeTaskResume(root, task, reason);
   await writeTaskReadiness(root, task, reason);
   await writeTaskSnapshot(root, task, reason);
@@ -1505,6 +1646,7 @@ export async function createSpecProposal(root: string, taskId: string, note?: st
   const acceptance = await readAcceptance(root, taskId);
   const verification = await readVerification(root, taskId);
   const plan = await readPlan(root, taskId);
+  const research = await readTaskResearch(root, taskId);
   const now = new Date().toISOString();
   const id = `S-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${safeSlug(task.title)}`;
   const proposalPath = path.join(paths.specProposalsDir, `${id}.md`);
@@ -1521,7 +1663,7 @@ export async function createSpecProposal(root: string, taskId: string, note?: st
     targetPath,
     summary,
     content: "",
-  }, acceptance, verification, plan, note);
+  }, acceptance, verification, plan, note, research);
   await writeFile(proposalPath, content, "utf8");
   await appendTaskEvent(root, taskId, {
     type: "spec_proposal_created",
@@ -1600,9 +1742,11 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const resume = task ? await writeTaskResume(root, task, "context") : undefined;
   const readiness = task ? await writeTaskReadiness(root, task, "context") : undefined;
   const snapshot = task ? await writeTaskSnapshot(root, task, "context") : undefined;
+  const research = snapshot?.research;
+  const info = snapshot?.info;
   const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, upstreamReport);
-  return { root, task, specs: scored, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, upstreamReport, content };
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, research, info, upstreamReport);
+  return { root, task, specs: scored, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, research, info, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -1616,6 +1760,8 @@ export function formatContextBundle(
   resume?: ResumeState,
   readiness?: ReadinessState,
   snapshot?: TaskSnapshot,
+  research?: ResearchState,
+  info?: string,
   upstreamReport?: UpstreamSyncReport,
 ): string {
   const lines: string[] = [
@@ -1654,6 +1800,9 @@ export function formatContextBundle(
     }
     if (snapshot) {
       lines.push("", "Task snapshot:", formatSnapshotContext(snapshot));
+    }
+    if (research) {
+      lines.push("", "Research info:", formatResearchContext(research, info));
     }
     if (handoff) {
       lines.push("", "Latest handoff:", trimHandoffContent(handoff));
@@ -1771,6 +1920,142 @@ function extractPrd(prompt: string): {
   if (openQuestions.length === 0) openQuestions.push("None captured from the initial request.");
 
   return { goal, constraints, acceptanceCriteria, openQuestions };
+}
+
+function createResearchState(
+  taskId: string,
+  openQuestions: string[],
+  now: string,
+  generatedFrom = "created",
+): ResearchState {
+  return {
+    taskId,
+    updatedAt: now,
+    generatedFrom,
+    openQuestions: openQuestions.filter(item => item && item !== "None captured from the initial request."),
+    decisions: [],
+    items: [],
+  };
+}
+
+async function writeInitialTaskResearch(
+  root: string,
+  task: TaskState,
+  prd: ReturnType<typeof extractPrd>,
+  now: string,
+): Promise<ResearchState> {
+  const state = createResearchState(task.id, prd.openQuestions, now);
+  await writeResearchFiles(root, task, state);
+  return state;
+}
+
+async function writeResearchFiles(root: string, task: TaskState, state: ResearchState): Promise<void> {
+  const researchDir = path.join(getProjectPaths(root).tasksDir, task.id, "research");
+  await mkdir(researchDir, { recursive: true });
+  await writeFile(path.join(researchDir, "research.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(path.join(researchDir, "notes.md"), formatResearchNotes(task, state), "utf8");
+}
+
+function formatResearchNotes(task: TaskState, state: ResearchState): string {
+  return [
+    "# Research Notes",
+    "",
+    `Task: ${task.id}`,
+    `Title: ${task.title}`,
+    `Updated: ${state.updatedAt}`,
+    state.generatedFrom ? `Reason: ${state.generatedFrom}` : undefined,
+    "",
+    "## Open Questions",
+    "",
+    formatResumeList(state.openQuestions, "No open research questions recorded."),
+    "",
+    "## Decisions",
+    "",
+    formatResumeList(state.decisions, "No research decisions recorded."),
+    "",
+    "## Items",
+    "",
+    state.items.length === 0 ? "No research items recorded yet." : state.items.map(formatResearchItem).join("\n\n"),
+    "",
+  ].filter(line => line !== undefined).join("\n");
+}
+
+export function formatResearchSummary(state: ResearchState, max = 8): string {
+  return [
+    `research items: ${state.items.length}`,
+    `open questions: ${state.openQuestions.length}`,
+    `decisions: ${state.decisions.length}`,
+    state.items.length > 0 ? ["recent research:", ...state.items.slice(-max).map(item => `- ${item.id}: ${item.summary}`)].join("\n") : "recent research: none",
+  ].join("\n");
+}
+
+function formatResearchItem(item: ResearchItem): string {
+  return [
+    `### ${item.id}: ${item.summary}`,
+    "",
+    `- timestamp: ${item.timestamp}`,
+    item.source ? `- source: ${item.source}` : undefined,
+    item.details && item.details !== item.summary ? ["", item.details].join("\n") : undefined,
+  ].filter(line => line !== undefined).join("\n");
+}
+
+function formatTaskInfo(
+  task: TaskState,
+  acceptance: AcceptanceState,
+  plan: PlanState,
+  strategy: VerificationStrategy,
+  research: ResearchState | undefined,
+  reason: string,
+): string {
+  return [
+    "# Task Info",
+    "",
+    `Task: ${task.id}`,
+    `Title: ${task.title}`,
+    `Status: ${task.status}`,
+    `Phase: ${task.phase}`,
+    `Updated: ${new Date().toISOString()}`,
+    `Reason: ${reason}`,
+    "",
+    "## Technical Direction",
+    "",
+    task.initialPrompt,
+    "",
+    "## Research",
+    "",
+    research ? formatResearchSummary(research, 12) : "No research artifact recorded yet.",
+    "",
+    "## Acceptance",
+    "",
+    formatAcceptanceSummary(acceptance, 12),
+    "",
+    "## Implementation Plan",
+    "",
+    formatPlanSummary(plan, 12),
+    "",
+    "## Verification Strategy",
+    "",
+    formatVerificationSuggestions(strategy, 8),
+    "",
+    "## Open Questions",
+    "",
+    research && research.openQuestions.length > 0 ? formatResumeList(research.openQuestions, "") : "No open questions recorded.",
+    "",
+    "## Manual Notes",
+    "",
+    "Add human technical notes here. Project Flow creates this file once and does not overwrite it on refresh.",
+    "",
+  ].join("\n");
+}
+
+function isResearchItem(value: unknown): value is ResearchItem {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" &&
+    typeof record.timestamp === "string" &&
+    typeof record.summary === "string" &&
+    (record.source === undefined || typeof record.source === "string") &&
+    (record.details === undefined || typeof record.details === "string");
 }
 
 function createAcceptanceState(prd: ReturnType<typeof extractPrd>, now: string): AcceptanceState {
@@ -2460,16 +2745,18 @@ function formatOverviewTaskLine(task: ProjectOverviewTask): string {
 
 async function buildTaskSnapshot(root: string, task: TaskState, reason: string): Promise<TaskSnapshot> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [acceptance, plan, verification, verificationStrategy, events, handoff] = await Promise.all([
+  const [acceptance, plan, verification, verificationStrategy, events, handoff, research] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readPlan(root, currentTask.id),
     readVerification(root, currentTask.id),
     readVerificationStrategy(root, currentTask.id),
     readTaskEvents(root, currentTask.id),
     readTaskHandoff(root, currentTask.id),
+    readTaskResearch(root, currentTask.id),
   ]);
   const resume = await writeTaskResume(root, currentTask, reason);
   const readiness = await writeTaskReadiness(root, currentTask, reason);
+  const info = await writeTaskInfo(root, currentTask, reason);
   const recentEvents = events.slice(-20).map(event => ({
     type: event.type,
     timestamp: event.timestamp,
@@ -2492,6 +2779,8 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     readiness,
     recentEvents,
     touchedFiles: resume.touchedFiles,
+    research,
+    info,
     handoff,
   };
 }
@@ -2534,6 +2823,14 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "## Verification Suggestions",
     "",
     formatVerificationSuggestions(snapshot.verificationStrategy, 8),
+    "",
+    "## Research",
+    "",
+    snapshot.research ? formatResearchSummary(snapshot.research, 8) : "No research artifact recorded yet.",
+    "",
+    "## Task Info",
+    "",
+    snapshot.info ? trimHandoffContent(snapshot.info, 1600) : "No task info recorded yet.",
     "",
     "## Touched Files",
     "",
@@ -3012,6 +3309,21 @@ function formatResumeContext(resume: ResumeState, max = 1800): string {
   return content.length <= max ? content : `${content.slice(0, max)}\n[Resume truncated by Project Flow]`;
 }
 
+function formatResearchContext(research: ResearchState, info?: string, max = 1400): string {
+  const lines = [
+    `- updated: ${research.updatedAt}`,
+    `- items: ${research.items.length}`,
+    research.openQuestions.length > 0 ? `- open questions: ${research.openQuestions.slice(0, 4).join("; ")}` : "- open questions: none recorded",
+    research.decisions.length > 0 ? `- decisions: ${research.decisions.slice(0, 4).join("; ")}` : "- decisions: none recorded",
+    research.items.length > 0
+      ? `- recent items: ${research.items.slice(-4).map(item => `${item.id} ${item.summary}`).join("; ")}`
+      : "- recent items: none recorded",
+    info ? `- info.md excerpt: ${summarizeUnknown(info.replace(/\s+/g, " "), 360)}` : "- info.md excerpt: none",
+  ];
+  const content = lines.join("\n");
+  return content.length <= max ? content : `${content.slice(0, max)}\n[Research context truncated by Project Flow]`;
+}
+
 function isResumeEvent(value: unknown): value is ResumeState["recentEvents"][number] {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
@@ -3046,8 +3358,10 @@ function formatSpecProposal(
   verification: VerificationState,
   plan: PlanState,
   note?: string,
+  research?: ResearchState,
 ): string {
   const specTitle = proposal.title.replace(/^#+\s*/, "").trim() || proposal.id;
+  const researchPath = research ? path.join(getProjectPaths(root).tasksDir, proposal.taskId, "info.md") : undefined;
   return [
     "---",
     `id: ${proposal.id}`,
@@ -3069,6 +3383,8 @@ function formatSpecProposal(
     `- Acceptance: ${acceptance.items.filter(item => item.status === "done").length}/${acceptance.items.length} done`,
     `- Verification: ${verification.checks.filter(check => check.success).length}/${verification.checks.length} passed`,
     `- Plan: ${plan.steps.filter(step => step.status === "done").length}/${plan.steps.length} done`,
+    researchPath ? `- Research info: ${path.relative(root, researchPath).replaceAll("\\", "/")}` : undefined,
+    research && research.items.length > 0 ? `- Research items: ${research.items.slice(-4).map(item => `${item.id} ${item.summary}`).join("; ")}` : undefined,
     note ? `- Note: ${note}` : undefined,
     "",
     "## Proposed Spec",

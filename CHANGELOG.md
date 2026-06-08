@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.0
+
+- Added Trellis-style research artifacts for each task: `research/research.json`, `research/notes.md`, and `info.md`.
+- Added `/task:info`, `/research:status`, and `/research:add`.
+- Linked research summaries into task snapshots, hidden context, and spec proposals.
+- `info.md` is created once and left human-editable; generated research summaries are kept in structured artifacts.
+
+## 0.11.1
+
+- Fixed automatic task tracking when a coding prompt is phrased as inspection, diagnosis, verification, or troubleshooting.
+- Added a tool-activity fallback that creates a Project Flow task when mutating or verification tools run without an existing active task.
+- Preserved tool arguments across OMP start/end hook events so verification commands such as `bun test` are recorded correctly.
+
 ## 0.11.0
 
 - Added upstream sync state under `.project-flow/upstreams/`.

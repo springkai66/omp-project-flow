@@ -11,6 +11,7 @@ This plugin provides a native project workflow for agent work:
 - durable project specs
 - reviewable spec proposals
 - task PRDs with simple goal, constraint, acceptance, and open-question extraction
+- task research artifacts and `info.md` technical notes
 - structured plan state
 - acceptance state
 - handoff summaries for resuming interrupted work
@@ -65,22 +66,23 @@ When a user prompt looks like code work, the extension automatically:
 
 1. creates or resumes an active task
 2. writes `.project-flow/tasks/<task-id>/prd.md`
-3. creates `plan.json` and `plan.md`
-4. reads relevant specs from `.project-flow/spec`
-5. injects hidden project flow context before the agent starts
-6. records tool events into `events.jsonl`
-7. records test/check/lint style commands into `verification.json`
-8. suggests verification commands in `verification-strategy.json`
-9. keeps acceptance state in `acceptance.json`
-10. creates reviewable spec proposals when tasks finish
-11. refreshes a resumable `handoff.md`
-12. refreshes `resume.json` and `resume.md`
-13. refreshes `readiness.json` and `readiness.md`
-14. refreshes `snapshot.json` and `snapshot.md`
-15. refreshes project-level `workspace/overview.json` and `workspace/overview.md`
-16. blocks `/task:finish` when required finish signals are missing, unless `--force` is provided
-17. writes turn journals under `.project-flow/workspace/journals`
-18. keeps upstream sync review packs under `.project-flow/upstreams`
+3. creates `research/research.json`, `research/notes.md`, and `info.md`
+4. creates `plan.json` and `plan.md`
+5. reads relevant specs from `.project-flow/spec`
+6. injects hidden project flow context before the agent starts
+7. records tool events into `events.jsonl`
+8. records test/check/lint style commands into `verification.json`
+9. suggests verification commands in `verification-strategy.json`
+10. keeps acceptance state in `acceptance.json`
+11. creates reviewable spec proposals when tasks finish
+12. refreshes a resumable `handoff.md`
+13. refreshes `resume.json` and `resume.md`
+14. refreshes `readiness.json` and `readiness.md`
+15. refreshes `snapshot.json` and `snapshot.md`
+16. refreshes project-level `workspace/overview.json` and `workspace/overview.md`
+17. blocks `/task:finish` when required finish signals are missing, unless `--force` is provided
+18. writes turn journals under `.project-flow/workspace/journals`
+19. keeps upstream sync review packs under `.project-flow/upstreams`
 
 ## Commands
 
@@ -100,8 +102,11 @@ Commands are escape hatches and diagnostics:
 /task:show <id-prefix-or-title>
 /task:switch <id-prefix-or-title>
 /task:handoff [id-prefix-or-title]
+/task:info [id-prefix-or-title]
 /task:finish [--force] [note]
 /task:pause [note]
+/research:status [id-prefix-or-title]
+/research:add <note>
 /plan:status [id-prefix-or-title]
 /plan:next [id-prefix-or-title]
 /plan:done [id] [evidence]
@@ -129,6 +134,8 @@ Normal work does not require commands. The task commands are useful when you wan
 
 The upstream commands are for controlled upgrades when ECC or OMO changes. They refresh the local sync report, mark reviewed upstream references, or create a normal Project Flow task to adapt useful ideas.
 
+`info.md` is created once and is safe for human technical notes. Project Flow does not overwrite it after creation. `research/notes.md` is generated from `research/research.json`; add durable research notes with `/research:add` or put free-form manual notes in `info.md`.
+
 ## Project Layout
 
 ```text
@@ -150,6 +157,10 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
     T-YYYYMMDD-slug/
       task.json
       prd.md
+      info.md
+      research/
+        research.json
+        notes.md
       acceptance.json
       handoff.md
       resume.json
@@ -197,6 +208,17 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.12.0
+
+- Added task research artifacts: `research/research.json`, `research/notes.md`, and `info.md`.
+- Added `/task:info`, `/research:status`, and `/research:add`.
+- Research summaries now appear in task snapshots, hidden context, and spec proposals.
+
+### 0.11.1
+
+- Fixed automatic task tracking for inspection, diagnosis, verification, and troubleshooting prompts.
+- Added tool-activity fallback tracking when mutating or verification tools run without an active task.
 
 ### 0.11.0
 

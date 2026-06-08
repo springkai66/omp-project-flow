@@ -11,6 +11,7 @@ Project Flow 是一个面向 Oh My Pi 的项目工作流、任务状态和规范
 - 持久化项目规范
 - 可审阅的规范提案
 - 任务 PRD，并自动提取目标、约束、验收条件和开放问题
+- 任务 research artifacts 和 `info.md` 技术笔记
 - 结构化计划状态
 - 验收状态
 - 用于恢复中断工作的 handoff 摘要
@@ -65,22 +66,23 @@ omp plugin list
 
 1. 创建或恢复 active task
 2. 写入 `.project-flow/tasks/<task-id>/prd.md`
-3. 创建 `plan.json` 和 `plan.md`
-4. 从 `.project-flow/spec` 读取相关规范
-5. 在 agent 启动前注入隐藏的 project flow context
-6. 将工具事件记录到 `events.jsonl`
-7. 将 test/check/lint 风格命令记录到 `verification.json`
-8. 在 `verification-strategy.json` 中建议验证命令
-9. 在 `acceptance.json` 中维护验收状态
-10. 任务完成时创建可审阅的 spec proposal
-11. 刷新可恢复的 `handoff.md`
-12. 刷新 `resume.json` 和 `resume.md`
-13. 刷新 `readiness.json` 和 `readiness.md`
-14. 刷新 `snapshot.json` 和 `snapshot.md`
-15. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
-16. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
-17. 将 turn journal 写入 `.project-flow/workspace/journals`
-18. 将上游同步审查包写入 `.project-flow/upstreams`
+3. 创建 `research/research.json`、`research/notes.md` 和 `info.md`
+4. 创建 `plan.json` 和 `plan.md`
+5. 从 `.project-flow/spec` 读取相关规范
+6. 在 agent 启动前注入隐藏的 project flow context
+7. 将工具事件记录到 `events.jsonl`
+8. 将 test/check/lint 风格命令记录到 `verification.json`
+9. 在 `verification-strategy.json` 中建议验证命令
+10. 在 `acceptance.json` 中维护验收状态
+11. 任务完成时创建可审阅的 spec proposal
+12. 刷新可恢复的 `handoff.md`
+13. 刷新 `resume.json` 和 `resume.md`
+14. 刷新 `readiness.json` 和 `readiness.md`
+15. 刷新 `snapshot.json` 和 `snapshot.md`
+16. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
+17. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
+18. 将 turn journal 写入 `.project-flow/workspace/journals`
+19. 将上游同步审查包写入 `.project-flow/upstreams`
 
 ## 命令
 
@@ -100,8 +102,11 @@ omp plugin list
 /task:show <id-prefix-or-title>
 /task:switch <id-prefix-or-title>
 /task:handoff [id-prefix-or-title]
+/task:info [id-prefix-or-title]
 /task:finish [--force] [note]
 /task:pause [note]
+/research:status [id-prefix-or-title]
+/research:add <note>
 /plan:status [id-prefix-or-title]
 /plan:next [id-prefix-or-title]
 /plan:done [id] [evidence]
@@ -129,6 +134,8 @@ omp plugin list
 
 上游命令用于 ECC 或 OMO 升级后的受控同步。它们会刷新本地同步报告、标记某个上游版本已审，或创建一个普通 Project Flow 任务来适配有价值的方案。
 
+`info.md` 会在任务创建时生成一次，之后不会被 Project Flow 自动覆盖，适合写人工技术笔记。`research/notes.md` 是从 `research/research.json` 生成的摘要；长期 research note 建议用 `/research:add` 记录，或把自由格式人工笔记写入 `info.md`。
+
 ## 项目目录
 
 ```text
@@ -150,6 +157,10 @@ omp plugin list
     T-YYYYMMDD-slug/
       task.json
       prd.md
+      info.md
+      research/
+        research.json
+        notes.md
       acceptance.json
       handoff.md
       resume.json
@@ -197,6 +208,17 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.12.0
+
+- 新增任务 research artifacts：`research/research.json`、`research/notes.md` 和 `info.md`。
+- 新增 `/task:info`、`/research:status` 和 `/research:add`。
+- Research 摘要现在会进入 task snapshot、隐藏上下文和 spec proposal。
+
+### 0.11.1
+
+- 修复检查、排查、验证和故障定位类提示没有自动创建任务的问题。
+- 新增工具事件兜底追踪：没有 active task 时，修改或验证工具也能补建任务。
 
 ### 0.11.0
 

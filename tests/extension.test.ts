@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import projectFlowExtension from "../src/index";
-import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan } from "../src/core";
+import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readTaskResearch, readVerification } from "../src/core";
 
 type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
@@ -67,6 +67,9 @@ describe("project flow extension", () => {
       expect(fake.commands.has("task:show")).toBe(true);
       expect(fake.commands.has("task:switch")).toBe(true);
       expect(fake.commands.has("task:handoff")).toBe(true);
+      expect(fake.commands.has("task:info")).toBe(true);
+      expect(fake.commands.has("research:status")).toBe(true);
+      expect(fake.commands.has("research:add")).toBe(true);
       expect(fake.commands.has("verify:status")).toBe(true);
       expect(fake.commands.has("verify:suggest")).toBe(true);
       expect(fake.commands.has("verify:refresh")).toBe(true);
@@ -106,6 +109,46 @@ describe("project flow extension", () => {
       expect(result?.message?.customType).toBe("project-flow");
       expect(result?.message?.display).toBe(false);
       expect(result?.message?.content).toContain("[PROJECT FLOW ACTIVE]");
+    });
+  });
+
+  test("recovers tool args from start events and infers a task from tool execution", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const toolStart = fake.handlers.get("tool_execution_start")?.[0];
+      const toolEnd = fake.handlers.get("tool_execution_end")?.[0];
+      expect(toolStart).toBeDefined();
+      expect(toolEnd).toBeDefined();
+
+      await toolStart?.(
+        {
+          type: "tool_execution_start",
+          toolCallId: "call-test",
+          toolName: "bash",
+          args: { command: "bun test" },
+        },
+        fake.ctx(root),
+      );
+      await toolEnd?.(
+        {
+          type: "tool_execution_end",
+          toolCallId: "call-test",
+          toolName: "bash",
+          result: "3 pass",
+          isError: false,
+        },
+        fake.ctx(root),
+      );
+
+      const active = await loadActiveTask(root);
+      expect(active?.title).toContain("bun test");
+      expect(active?.phase).toBe("verifying");
+
+      const verification = await readVerification(root, active!.id);
+      expect(verification.checks[0]?.command).toBe("bun test");
+      expect(verification.checks[0]?.success).toBe(true);
     });
   });
 
@@ -199,6 +242,28 @@ describe("project flow extension", () => {
       expect(fake.sentMessages[0]?.message.content).toContain(task.id);
       expect(fake.sentMessages[0]?.message.content).toContain("# Resume Pack");
       expect(fake.sentMessages[0]?.options?.triggerTurn).toBe(true);
+    });
+  });
+
+  test("updates research artifacts through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "implement research command\n- 验收: research command records notes");
+      await fake.commands.get("research:add").handler("Found a useful API detail", fake.ctx(root));
+
+      const research = await readTaskResearch(root, task.id);
+      expect(research?.items[0]?.summary).toBe("Found a useful API detail");
+      expect(fake.notifications.at(-1)?.message).toContain("research items: 1");
+
+      await fake.commands.get("research:status").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain(`Research for ${task.id}`);
+      expect(fake.notifications.at(-1)?.message).toContain("Found a useful API detail");
+
+      await fake.commands.get("task:info").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("# Task Info");
+      expect(fake.notifications.at(-1)?.message).toContain("## Manual Notes");
     });
   });
 

@@ -4,11 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildContextBundle,
+  addTaskResearchNote,
   applySpecProposal,
   createSpecProposal,
   createTask,
   ensureProject,
   finishActiveTask,
+  getProjectPaths,
   isCodeWorkPrompt,
   listTasks,
   listSpecProposals,
@@ -20,6 +22,9 @@ import {
   readTaskResume,
   readTaskSnapshot,
   readTaskHandoff,
+  readTaskEvents,
+  readTaskInfo,
+  readTaskResearch,
   readUpstreamSyncReport,
   readVerification,
   readVerificationStrategy,
@@ -51,6 +56,8 @@ async function withTempProject<T>(fn: (root: string) => Promise<T>): Promise<T> 
 describe("project flow core", () => {
   test("detects code work prompts conservatively", () => {
     expect(isCodeWorkPrompt("帮我实现登录功能")).toBe(true);
+    expect(isCodeWorkPrompt("检查中文硬编码")).toBe(true);
+    expect(isCodeWorkPrompt("排查 hook 没有触发的问题")).toBe(true);
     expect(isCodeWorkPrompt("fix the auth tests")).toBe(true);
     expect(isCodeWorkPrompt("如何理解这个设计")).toBe(false);
   });
@@ -113,6 +120,17 @@ describe("project flow core", () => {
       expect(prd).toContain("- 必须保持现有命令兼容");
       expect(prd).toContain("- [ ] 验收: 支持查看最近验证记录");
       expect(prd).toContain("- 是否需要迁移旧数据？");
+
+      const research = await readTaskResearch(root, task.id);
+      expect(research?.openQuestions).toContain("是否需要迁移旧数据？");
+      const researchNotes = await readFile(path.join(paths.tasksDir, task.id, "research", "notes.md"), "utf8");
+      expect(researchNotes).toContain("# Research Notes");
+      expect(researchNotes).toContain("是否需要迁移旧数据？");
+
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("# Task Info");
+      expect(info).toContain("## Research");
+      expect(info).toContain("## Manual Notes");
     });
   });
 
@@ -143,6 +161,68 @@ describe("project flow core", () => {
 
       const acceptanceFile = await readFile(path.join(paths.tasksDir, task.id, "acceptance.json"), "utf8");
       expect(acceptanceFile).toContain("covered by unit test");
+    });
+  });
+
+  test("links research notes into info, snapshots, context, and spec proposals", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "implement research artifacts\n- 验收: research notes appear in outputs");
+
+      const research = await addTaskResearchNote(
+        root,
+        task.id,
+        "Found that OMP tool_execution_end omits args; preserve start args by toolCallId.",
+        "research",
+      );
+      expect(research?.items[0]?.summary).toContain("OMP tool_execution_end");
+
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("# Task Info");
+
+      const researchNotes = await readFile(path.join(getProjectPaths(root).tasksDir, task.id, "research", "notes.md"), "utf8");
+      expect(researchNotes).toContain("OMP tool_execution_end");
+
+      const snapshot = await writeTaskSnapshot(root, task, "test");
+      expect(snapshot.research?.items[0]?.summary).toContain("OMP tool_execution_end");
+      expect(snapshot.info).toContain("# Task Info");
+
+      const bundle = await buildContextBundle(root, "continue research artifacts", task);
+      expect(bundle.content).toContain("Research info:");
+      expect(bundle.content).toContain("OMP tool_execution_end");
+
+      const proposal = await createSpecProposal(root, task.id, "include research evidence");
+      expect(proposal?.content).toContain("Research info:");
+    });
+  });
+
+  test("preserves human-edited task info on refresh", async () => {
+    await withTempProject(async root => {
+      const paths = await ensureProject(root);
+      const task = await createTask(root, "preserve manual task info");
+      const infoPath = path.join(paths.tasksDir, task.id, "info.md");
+      await writeFile(
+        infoPath,
+        [
+          "# Custom Task Info",
+          "",
+          "## Manual Notes",
+          "",
+          "Keep this design note.",
+          "",
+          "## Custom Section",
+          "",
+          "Do not overwrite this section.",
+          "",
+        ].join("\n"),
+        "utf8",
+      );
+
+      await writeTaskSnapshot(root, task, "refresh");
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("# Custom Task Info");
+      expect(info).toContain("Keep this design note.");
+      expect(info).toContain("Do not overwrite this section.");
     });
   });
 
@@ -193,6 +273,31 @@ describe("project flow core", () => {
       const plan = await readPlan(root, task.id);
       expect(plan.steps.find(step => step.id === "P3")?.status).toBe("done");
       expect(plan.currentStepId).toBe("P4");
+    });
+  });
+
+  test("infers an active task from mutating tool activity", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      expect(await loadActiveTask(root)).toBeUndefined();
+
+      await recordToolEvent(root, "tool_end", {
+        toolName: "edit",
+        toolCallId: "call-edit",
+        args: { path: "src/index.ts", oldString: "before", newString: "after" },
+        isError: false,
+        resultSummary: "edited src/index.ts",
+      });
+
+      const active = await loadActiveTask(root);
+      expect(active?.title).toContain("Continue Project Flow for edit");
+      expect(active?.phase).toBe("implementing");
+      expect(active?.counters.toolCalls).toBe(1);
+      expect(active?.checkpoints.find(checkpoint => checkpoint.id === "implement")?.done).toBe(true);
+
+      const events = await readTaskEvents(root, active!.id);
+      expect(events.some(event => event.type === "task_inferred")).toBe(true);
+      expect(events.some(event => event.type === "tool_end")).toBe(true);
     });
   });
 

@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
   advancePlan,
+  addTaskResearchNote,
   applySpecProposal,
   buildContextBundle,
   createSpecProposal,
@@ -11,6 +12,7 @@ import {
   formatAcceptanceSummary,
   formatProjectOverviewSummary,
   formatReadinessSummary,
+  formatResearchSummary,
   formatSnapshotSummary,
   formatSpecProposalSummary,
   formatTaskSummary,
@@ -28,7 +30,9 @@ import {
   readAcceptance,
   readPlan,
   readSpecDocuments,
+  readTaskInfo,
   readTaskReadiness,
+  readTaskResearch,
   readVerificationStrategy,
   readVerification,
   refreshVerificationStrategy,
@@ -40,6 +44,7 @@ import {
   summarizeUnknown,
   updateAcceptanceItem,
   writeTaskHandoff,
+  writeTaskInfo,
   writeTaskReadiness,
   writeTaskResume,
   writeTaskSnapshot,
@@ -53,6 +58,7 @@ import {
 
 export default function projectFlowExtension(pi: ExtensionAPI) {
   pi.setLabel("Project Flow");
+  const pendingToolArgs = new Map<string, unknown>();
 
   pi.registerCommand("flow:init", {
     description: "Initialize .project-flow directories",
@@ -328,6 +334,65 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       }
       const handoff = await writeTaskHandoff(root, task, "command");
       ctx.ui.notify(trimForNotice(handoff), "info");
+    },
+  });
+
+  pi.registerCommand("task:info", {
+    description: "Show or create the active Project Flow task info artifact",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await getTaskFromArgsOrActive(root, args);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const info = await writeTaskInfo(root, task, "command");
+      ctx.ui.notify(trimForNotice(info), "info");
+    },
+  });
+
+  pi.registerCommand("research:status", {
+    description: "Show Project Flow research notes for a task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await getTaskFromArgsOrActive(root, args);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const research = await readTaskResearch(root, task.id);
+      const info = await readTaskInfo(root, task.id);
+      ctx.ui.notify(
+        [
+          `Research for ${task.id}:`,
+          research ? formatResearchSummary(research, 12) : "No research artifact recorded yet.",
+          info ? "info.md: available" : "info.md: missing",
+        ].join("\n"),
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand("research:add", {
+    description: "Add a research note to the active Project Flow task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root);
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const note = args.trim();
+      if (!note) {
+        ctx.ui.notify("Provide a research note to add.", "warning");
+        return;
+      }
+      const research = await addTaskResearchNote(root, task.id, note);
+      if (!research) {
+        ctx.ui.notify(`Could not update research for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(formatResearchSummary(research, 8), "info");
     },
   });
 
@@ -691,6 +756,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
 
   pi.on("tool_execution_start", async (event, ctx) => {
     const root = await findProjectRoot(ctx.cwd);
+    pendingToolArgs.set(event.toolCallId, event.args);
     await recordToolEvent(root, "tool_start", {
       toolName: event.toolName,
       toolCallId: event.toolCallId,
@@ -700,10 +766,12 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
 
   pi.on("tool_execution_end", async (event, ctx) => {
     const root = await findProjectRoot(ctx.cwd);
+    const args = pendingToolArgs.get(event.toolCallId);
+    pendingToolArgs.delete(event.toolCallId);
     await recordToolEvent(root, "tool_end", {
       toolName: event.toolName,
       toolCallId: event.toolCallId,
-      args: event.args,
+      args,
       isError: event.isError,
       resultSummary: summarizeUnknown(event.result),
     });
