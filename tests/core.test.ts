@@ -7,6 +7,7 @@ import {
   addTaskResearchNote,
   answerTaskClarification,
   applySpecProposal,
+  applySubtaskPlan,
   buildSubtaskTree,
   createSpecProposal,
   createChildTask,
@@ -23,6 +24,8 @@ import {
   readProjectOverview,
   readPlan,
   readAcceptance,
+  refreshSubtaskPlanArtifacts,
+  readSubtaskPlan,
   readTaskReadiness,
   readTaskResume,
   readTaskSnapshot,
@@ -53,7 +56,9 @@ import {
   writeTaskSnapshot,
   writeUpstreamSyncReport,
   formatTaskMetadataSummary,
+  formatSubtaskPlanSummary,
   formatSubtaskTree,
+  writeSubtaskPlan,
 } from "../src/core";
 
 async function withTempProject<T>(fn: (root: string) => Promise<T>): Promise<T> {
@@ -201,6 +206,84 @@ describe("project flow core", () => {
       expect(finishedChild?.status).toBe("finished");
       const nextParentInfo = await readTaskInfo(root, nextParent.id);
       expect(nextParentInfo).toContain(`${child!.id} [finished/finished]`);
+    });
+  });
+
+  test("creates and applies an automatic subtask plan", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, [
+        "implement full project workflow automation",
+        "- Acceptance: generate PRD artifacts",
+        "- Acceptance: create child task suggestions",
+        "- Acceptance: verify generated workflow state",
+        "必须保持现有命令兼容",
+      ].join("\n"));
+
+      const plan = await readSubtaskPlan(root, task.id);
+      expect(plan?.mode).toBe("suggest");
+      expect(plan?.items.length).toBeGreaterThanOrEqual(3);
+      expect(formatSubtaskPlanSummary(plan!)).toContain("suggested");
+
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("## Subtask Plan");
+      expect(info).toContain("subtask plan:");
+
+      const bundle = await buildContextBundle(root, "continue workflow automation", task);
+      expect(bundle.content).toContain("Subtask plan:");
+
+      const result = await applySubtaskPlan(root, task.id);
+      expect(result.status).toBe("applied");
+      expect(result.created.length).toBeGreaterThanOrEqual(1);
+      expect(result.created.every(child => child.status === "paused")).toBe(true);
+      const applied = await readSubtaskPlan(root, task.id);
+      expect(applied?.items.some(item => item.status === "created" && !!item.childTaskId)).toBe(true);
+      const tree = await buildSubtaskTree(root, task.id);
+      expect(tree?.totalTasks).toBeGreaterThan(1);
+
+      const childPlan = await readSubtaskPlan(root, result.created[0].id);
+      expect(childPlan).toBeUndefined();
+
+      const refreshed = await writeSubtaskPlan(root, task, "suggest", "test_refresh");
+      expect(refreshed.items.some(item => item.status === "created")).toBe(true);
+    });
+  });
+
+  test("keeps subtask plan off mode empty and refreshes generated artifacts", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, [
+        "implement legacy workflow split",
+        "- Acceptance: suggest child tasks",
+        "- Acceptance: sync task info",
+      ].join("\n"), { subtaskMode: "off" });
+
+      const disabled = await readSubtaskPlan(root, task.id);
+      expect(disabled).toBeUndefined();
+
+      const offPlan = await writeSubtaskPlan(root, task, "off", "test_off");
+      expect(offPlan.items).toHaveLength(0);
+      const skipped = await applySubtaskPlan(root, task.id);
+      expect(skipped.status).toBe("empty");
+      expect(skipped.created).toHaveLength(0);
+
+      const suggested = await writeSubtaskPlan(root, task, "suggest", "test_refresh");
+      expect(suggested.items.length).toBeGreaterThan(0);
+      await refreshSubtaskPlanArtifacts(root, task.id, "test_refresh");
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("## Subtask Plan");
+      expect(info).toContain("suggested");
+      const snapshot = await readTaskSnapshot(root, task.id);
+      expect(snapshot?.subtaskPlan?.items.length).toBeGreaterThan(0);
+    });
+  });
+
+  test("does not suggest subtasks for simple root tasks by default", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "fix typo in readme");
+      const plan = await readSubtaskPlan(root, task.id);
+      expect(plan?.items).toHaveLength(0);
     });
   });
 

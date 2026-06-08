@@ -112,6 +112,7 @@ omp plugin list
 /task:metadata [id-prefix-or-title]
 /task:child <prompt>
 /task:tree [id-prefix-or-title]
+/task:subtasks [--refresh|--apply] [id-prefix-or-title]
 /task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
@@ -188,6 +189,9 @@ omp plugin list
       readiness.md
       snapshot.json
       snapshot.md
+      subtasks/
+        plan.json
+        plan.md
       plan.json
       plan.md
       events.jsonl
@@ -199,7 +203,7 @@ omp plugin list
 
 任务 metadata 存在每个 `task.json` 的 `metadata` 字段中。它只记录稳定、非派生信息，例如 `kind`、`source`、`priority`、`risk`、`labels`、`origin` 和任务关系。readiness、验证数量、触碰文件等派生状态仍由 snapshot/resume/readiness artifacts 生成。
 
-Subtask 是通过 `metadata.relationships.parentTaskId` 和 `childTaskIds` 关联的普通任务。使用 `/task:child <prompt>` 在当前 active task 下创建子任务，使用 `/task:tree` 查看任务树。当子任务尚未完成时，父任务 readiness 会阻止收尾；仍可用 `/task:finish --force` 覆盖。
+Subtask 是通过 `metadata.relationships.parentTaskId` 和 `childTaskIds` 关联的普通任务。Project Flow 会为复杂根任务在 `subtasks/plan.json` 和 `subtasks/plan.md` 下生成受控子任务计划；使用 `/task:subtasks` 查看建议，`/task:subtasks --refresh` 重新生成，`/task:subtasks --apply` 创建已关联的子任务。也可以用 `/task:child <prompt>` 手动创建子任务，用 `/task:tree` 查看任务树。当子任务尚未完成时，父任务 readiness 会阻止收尾；仍可用 `/task:finish --force` 覆盖。
 
 验证建议会从常见项目文件中推断，例如 `package.json`、`pyproject.toml`、`pytest.ini`、`Cargo.toml`、`go.mod`、`.sln`、`.csproj` 和 `Makefile`。
 
@@ -231,6 +235,13 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.16.0
+
+- 新增 Auto Subtask Planner v1：生成子任务建议。
+- 新增 `/task:subtasks [--refresh|--apply] [id-prefix-or-title]`。
+- 子任务计划摘要现在会进入隐藏上下文、task info 和 snapshot。
+- 应用子任务计划会创建已关联的 child tasks，并保持 parent task 为 active。
 
 ### 0.15.0
 

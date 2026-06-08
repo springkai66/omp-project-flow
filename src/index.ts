@@ -4,6 +4,7 @@ import {
   advancePlan,
   addTaskResearchNote,
   answerTaskClarification,
+  applySubtaskPlan,
   applySpecProposal,
   buildSubtaskTree,
   buildContextBundle,
@@ -21,6 +22,7 @@ import {
   formatResearchSummary,
   formatSnapshotSummary,
   formatSpecProposalSummary,
+  formatSubtaskPlanSummary,
   formatSubtaskTree,
   formatTaskMetadataSummary,
   formatTaskSummary,
@@ -38,8 +40,10 @@ import {
   readAcceptance,
   readPlan,
   readSpecDocuments,
+  refreshSubtaskPlanArtifacts,
   readTaskClarification,
   readTaskInfo,
+  readSubtaskPlan,
   readTaskReadiness,
   readTaskResearch,
   readVerificationStrategy,
@@ -58,6 +62,7 @@ import {
   updateAcceptanceItem,
   writeTaskHandoff,
   writeTaskInfo,
+  writeSubtaskPlan,
   writeTaskReadiness,
   writeTaskResume,
   writeTaskSnapshot,
@@ -421,6 +426,42 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         return;
       }
       ctx.ui.notify(trimForNotice(formatSubtaskTree(tree), 5000), tree.blockedTasks.length > 0 ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("task:subtasks", {
+    description: "Show, refresh, or apply the Project Flow subtask plan",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parsed = parseSubtaskPlanArgs(args);
+      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      if (parsed.action === "apply") {
+        const result = await applySubtaskPlan(root, task.id);
+        if (result.status === "missing") {
+          ctx.ui.notify(`No matching Project Flow task for ${task.id}.`, "warning");
+          return;
+        }
+        const plan = result.plan || await readSubtaskPlan(root, task.id);
+        ctx.ui.notify(
+          [
+            result.created.length > 0
+              ? `Created ${result.created.length} child task(s): ${result.created.map(child => child.id).join(", ")}`
+              : "No suggested subtasks were available to create.",
+            plan ? formatSubtaskPlanSummary(plan, 12) : undefined,
+          ].filter(Boolean).join("\n"),
+          result.created.length > 0 ? "info" : "warning",
+        );
+        return;
+      }
+      const plan = parsed.action === "refresh"
+        ? await writeSubtaskPlan(root, task, "suggest", "command_refresh")
+        : (await readSubtaskPlan(root, task.id)) || await writeSubtaskPlan(root, task, "suggest", "command");
+      await refreshSubtaskPlanArtifacts(root, task.id, parsed.action === "refresh" ? "subtask_plan_refreshed" : "subtask_plan_shown");
+      ctx.ui.notify(formatSubtaskPlanSummary(plan, 12), plan.items.length > 0 ? "info" : "warning");
     },
   });
 
@@ -1177,6 +1218,24 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       return { query: parts.shift() || "", evidence: parts.join(" ").trim() || undefined };
     }
     return { query: "", evidence: trimmed };
+  }
+
+  function parseSubtaskPlanArgs(args: string): { action: "show" | "refresh" | "apply"; query: string } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    let action: "show" | "refresh" | "apply" = "show";
+    const queryParts: string[] = [];
+    for (const part of parts) {
+      if (part === "--apply" || part === "apply") {
+        action = "apply";
+        continue;
+      }
+      if (part === "--refresh" || part === "refresh") {
+        action = "refresh";
+        continue;
+      }
+      queryParts.push(part);
+    }
+    return { action, query: queryParts.join(" ") };
   }
 
   function parseFinishArgs(args: string): { note?: string; force: boolean } {

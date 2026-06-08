@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.0
+
+- Added Auto Subtask Planner v1 with generated child-task suggestions under `subtasks/plan.json` and `subtasks/plan.md`.
+- Added `/task:subtasks [--refresh|--apply] [id-prefix-or-title]`.
+- Subtask plan summaries now appear in hidden context, task info, and snapshots.
+- Applying a subtask plan creates linked child tasks while preserving the active parent task.
+
 ## 0.15.0
 
 - Added Subtask Trees v1 with parent/child task relationships.

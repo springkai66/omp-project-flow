@@ -112,6 +112,7 @@ Commands are escape hatches and diagnostics:
 /task:metadata [id-prefix-or-title]
 /task:child <prompt>
 /task:tree [id-prefix-or-title]
+/task:subtasks [--refresh|--apply] [id-prefix-or-title]
 /task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
@@ -188,6 +189,9 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
       readiness.md
       snapshot.json
       snapshot.md
+      subtasks/
+        plan.json
+        plan.md
       plan.json
       plan.md
       events.jsonl
@@ -199,7 +203,7 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
 
 Task metadata is stored inside each `task.json` under `metadata`. It records stable, non-derived fields such as `kind`, `source`, `priority`, `risk`, `labels`, `origin`, and task relationships. Derived state such as readiness, verification counts, and touched files remains in snapshot/resume/readiness artifacts.
 
-Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId` and `childTaskIds`. Use `/task:child <prompt>` to create a child under the active task and `/task:tree` to inspect the tree. Parent task readiness is blocked while child tasks remain unfinished, unless `/task:finish --force` is used.
+Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId` and `childTaskIds`. Project Flow creates a guarded subtask plan for complex root tasks under `subtasks/plan.json` and `subtasks/plan.md`; use `/task:subtasks` to inspect suggestions, `/task:subtasks --refresh` to regenerate them, and `/task:subtasks --apply` to create linked child tasks. Use `/task:child <prompt>` to create a child manually and `/task:tree` to inspect the tree. Parent task readiness is blocked while child tasks remain unfinished, unless `/task:finish --force` is used.
 
 Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`.
 
@@ -231,6 +235,13 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.16.0
+
+- Added Auto Subtask Planner v1 with generated child-task suggestions.
+- Added `/task:subtasks [--refresh|--apply] [id-prefix-or-title]`.
+- Subtask plan summaries now appear in hidden context, task info, and snapshots.
+- Applying a subtask plan creates linked child tasks while preserving the active parent task.
 
 ### 0.15.0
 

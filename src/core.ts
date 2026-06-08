@@ -104,6 +104,7 @@ export interface ContextBundle {
   readiness?: ReadinessState;
   snapshot?: TaskSnapshot;
   subtasks?: string;
+  subtaskPlan?: SubtaskPlan;
   research?: ResearchState;
   info?: string;
   upstreamReport?: UpstreamSyncReport;
@@ -164,6 +165,7 @@ export interface TaskSnapshot {
   touchedFiles: string[];
   clarification?: ClarificationState;
   subtasks?: string;
+  subtaskPlan?: SubtaskPlan;
   research?: ResearchState;
   info?: string;
   handoff?: string;
@@ -273,6 +275,36 @@ export interface SubtaskTree {
   openTasks: number;
   finishedTasks: number;
   blockedTasks: string[];
+}
+
+export type AutoSubtaskMode = "off" | "suggest" | "auto";
+export type SubtaskPlanItemStatus = "suggested" | "created" | "skipped";
+
+export interface SubtaskPlanItem {
+  id: string;
+  title: string;
+  prompt: string;
+  reason: string;
+  status: SubtaskPlanItemStatus;
+  childTaskId?: string;
+  createdAt?: string;
+}
+
+export interface SubtaskPlan {
+  taskId: string;
+  mode: AutoSubtaskMode;
+  generatedAt: string;
+  updatedAt: string;
+  generatedFrom?: string;
+  summary: string;
+  items: SubtaskPlanItem[];
+}
+
+export interface SubtaskPlanApplyResult {
+  status: "applied" | "empty" | "missing";
+  task?: TaskState;
+  plan?: SubtaskPlan;
+  created: TaskState[];
 }
 
 export interface ProjectOverview {
@@ -463,6 +495,7 @@ export interface CreateTaskOptions {
   relatedSpecs?: string[];
   custom?: Record<string, unknown>;
   activate?: boolean;
+  subtaskMode?: AutoSubtaskMode;
 }
 
 const DEFAULT_CHECKPOINTS: Checkpoint[] = [
@@ -1369,7 +1402,8 @@ export async function writeTaskInfo(
   const currentTask = await loadTask(root, task.id) || task;
   if (existing !== undefined && !options.force && options.refreshSubtasks) {
     const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
-    const content = updateTaskInfoSubtasksSection(existing, subtaskSummary);
+    const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
+    const content = updateTaskInfoGeneratedSections(existing, subtaskSummary, subtaskPlan);
     await writeFile(infoPath, content, "utf8");
     return content;
   }
@@ -1382,19 +1416,32 @@ export async function writeTaskInfo(
     readTaskClarification(root, currentTask.id),
   ]);
   const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
-  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, reason);
+  const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
+  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, subtaskPlan, reason);
   await writeFile(infoPath, content, "utf8");
   return content;
 }
 
-function updateTaskInfoSubtasksSection(content: string, subtaskSummary: string): string {
-  const section = `## Subtasks\n\n${subtaskSummary}\n`;
-  const sectionPattern = /(^## Subtasks\r?\n\r?\n)([\s\S]*?)(?=\r?\n## |\s*$)/m;
+function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string, subtaskPlan: SubtaskPlan | undefined): string {
+  return updateTaskInfoSection(
+    updateTaskInfoSection(content, "Subtasks", subtaskSummary),
+    "Subtask Plan",
+    subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
+  );
+}
+
+function updateTaskInfoSection(content: string, title: string, body: string): string {
+  const section = `## ${title}\n\n${body}\n`;
+  const sectionPattern = new RegExp(`(^## ${escapeRegExp(title)}\\r?\\n\\r?\\n)([\\s\\S]*?)(?=\\r?\\n## |\\s*$)`, "m");
   if (sectionPattern.test(content)) {
-    return content.replace(sectionPattern, `$1${subtaskSummary}\n`);
+    return content.replace(sectionPattern, `$1${body}\n`);
   }
   const trimmedEnd = content.endsWith("\n") ? content : `${content}\n`;
   return `${trimmedEnd}\n${section}`;
+}
+
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export async function readTaskResume(root: string, taskId: string): Promise<ResumeState | undefined> {
@@ -1766,6 +1813,13 @@ export async function createTask(root: string, prompt: string, options: CreateTa
   await refreshVerificationStrategy(root, id);
   await writeInitialTaskResearch(root, task, prd, now);
   await writeClarificationFiles(root, task, clarification);
+  const subtaskMode = options.subtaskMode || "suggest";
+  if (subtaskMode !== "off" && !task.metadata.relationships.parentTaskId) {
+    const subtaskPlan = await writeSubtaskPlan(root, task, subtaskMode, "created", { prd });
+    if (subtaskMode === "auto" && subtaskPlan.items.length > 0) {
+      await applySubtaskPlan(root, task.id);
+    }
+  }
   if (activate) {
     await writeFile(paths.activeTaskPath, `${JSON.stringify({ id, updatedAt: now }, null, 2)}\n`, "utf8");
   }
@@ -1799,6 +1853,7 @@ export async function createChildTask(root: string, parentTaskId: string, prompt
     risk: parent.metadata?.risk || inferTaskRisk(prompt),
     relationships: { parentTaskId: parent.id },
     origin: { prompt, note: `child of ${parent.id}` },
+    subtaskMode: "off",
   });
   const linked = await linkParentChildTask(root, parent.id, child.id);
   if (!linked) return undefined;
@@ -1816,6 +1871,119 @@ export async function createChildTask(root: string, parentTaskId: string, prompt
     data: { parentTaskId: parent.id },
   });
   return (await loadTask(root, child.id)) || child;
+}
+
+export async function readSubtaskPlan(root: string, taskId: string): Promise<SubtaskPlan | undefined> {
+  const planPath = path.join(getProjectPaths(root).tasksDir, taskId, "subtasks", "plan.json");
+  if (!(await pathExists(planPath))) return undefined;
+  try {
+    return normalizeSubtaskPlan(JSON.parse(await readFile(planPath, "utf8")) as Partial<SubtaskPlan>);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writeSubtaskPlan(
+  root: string,
+  task: TaskState,
+  mode: AutoSubtaskMode = "suggest",
+  reason = "manual",
+  options: { prd?: ReturnType<typeof extractPrd> } = {},
+): Promise<SubtaskPlan> {
+  const currentTask = await loadTask(root, task.id) || task;
+  const existing = await readSubtaskPlan(root, currentTask.id);
+  const prd = options.prd || extractPrd(currentTask.initialPrompt);
+  const now = new Date().toISOString();
+  const suggestions = mode === "off" ? [] : buildSubtaskPlanItems(currentTask, prd, now);
+  const existingByPrompt = new Map((existing?.items || []).map(item => [normalizeSubtaskPromptKey(item.prompt), item]));
+  const items = suggestions.map(item => {
+    const previous = existingByPrompt.get(normalizeSubtaskPromptKey(item.prompt));
+    return previous && previous.status !== "suggested"
+      ? { ...item, status: previous.status, childTaskId: previous.childTaskId, createdAt: previous.createdAt }
+      : item;
+  });
+  const plan = normalizeSubtaskPlan({
+    taskId: currentTask.id,
+    mode,
+    generatedAt: existing?.generatedAt || now,
+    updatedAt: now,
+    generatedFrom: reason,
+    summary: summarizeSubtaskPlan(items, mode),
+    items,
+  }) || {
+    taskId: currentTask.id,
+    mode,
+    generatedAt: now,
+    updatedAt: now,
+    generatedFrom: reason,
+    summary: "No subtask suggestions generated.",
+    items: [],
+  };
+  await persistSubtaskPlan(root, currentTask, plan);
+  await appendTaskEvent(root, currentTask.id, {
+    type: "subtask_plan_updated",
+    timestamp: now,
+    data: { mode, reason, suggestions: plan.items.length },
+  });
+  return plan;
+}
+
+export async function refreshSubtaskPlanArtifacts(root: string, taskId: string, reason = "subtask_plan_refresh"): Promise<SubtaskPlan | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const plan = await readSubtaskPlan(root, task.id);
+  await writeTaskInfo(root, task, reason, { refreshSubtasks: true });
+  await writeTaskSnapshot(root, task, reason);
+  await writeTaskHandoff(root, task, reason);
+  return plan;
+}
+
+export async function applySubtaskPlan(root: string, taskId: string): Promise<SubtaskPlanApplyResult> {
+  const task = await loadTask(root, taskId);
+  if (!task) return { status: "missing", created: [] };
+  let plan = await readSubtaskPlan(root, task.id);
+  if (!plan) plan = await writeSubtaskPlan(root, task, "suggest", "apply_missing");
+  const pending = plan.items.filter(item => item.status === "suggested");
+  if (plan.mode === "off") return { status: "empty", task, plan, created: [] };
+  if (pending.length === 0) return { status: "empty", task, plan, created: [] };
+
+  const created: TaskState[] = [];
+  const now = new Date().toISOString();
+  const nextItems = [...plan.items];
+  for (const item of pending.slice(0, 8)) {
+    const child = await createChildTask(root, task.id, item.prompt);
+    if (!child) continue;
+    created.push(child);
+    const index = nextItems.findIndex(candidate => candidate.id === item.id);
+    if (index >= 0) {
+      nextItems[index] = { ...nextItems[index], status: "created", childTaskId: child.id, createdAt: now };
+    }
+  }
+
+  const nextPlan = normalizeSubtaskPlan({
+    ...plan,
+    mode: plan.mode === "off" ? "suggest" : plan.mode,
+    updatedAt: now,
+    generatedFrom: "apply",
+    items: nextItems,
+    summary: summarizeSubtaskPlan(nextItems, plan.mode),
+  }) || plan;
+  await persistSubtaskPlan(root, task, nextPlan);
+  await appendTaskEvent(root, task.id, {
+    type: "subtask_plan_applied",
+    timestamp: now,
+    data: { created: created.map(child => child.id) },
+  });
+  await writeTaskInfo(root, task, "subtask_plan_applied", { refreshSubtasks: true });
+  await writeTaskHandoff(root, task, "subtask_plan_applied");
+  return { status: created.length > 0 ? "applied" : "empty", task, plan: nextPlan, created };
+}
+
+async function persistSubtaskPlan(root: string, task: TaskState, plan: SubtaskPlan): Promise<void> {
+  const subtaskDir = path.join(getProjectPaths(root).tasksDir, task.id, "subtasks");
+  await mkdir(subtaskDir, { recursive: true });
+  await writeFile(path.join(subtaskDir, "plan.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+  await writeFile(path.join(subtaskDir, "plan.md"), formatSubtaskPlan(plan), "utf8");
 }
 
 export async function linkParentChildTask(root: string, parentTaskId: string, childTaskId: string): Promise<boolean> {
@@ -1903,6 +2071,44 @@ function flattenSubtaskTree(node: SubtaskTreeNode): SubtaskTreeNode[] {
   return [node, ...node.children.flatMap(flattenSubtaskTree)];
 }
 
+export function formatSubtaskPlan(plan: SubtaskPlan): string {
+  return [
+    "# Subtask Plan",
+    "",
+    `Task: ${plan.taskId}`,
+    `Mode: ${plan.mode}`,
+    `Updated: ${plan.updatedAt}`,
+    plan.generatedFrom ? `Reason: ${plan.generatedFrom}` : undefined,
+    "",
+    "## Summary",
+    "",
+    plan.summary,
+    "",
+    "## Suggestions",
+    "",
+    plan.items.length === 0 ? "No subtask suggestions generated." : plan.items.map(formatSubtaskPlanItem).join("\n"),
+    "",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+export function formatSubtaskPlanSummary(plan: SubtaskPlan, max = 8): string {
+  const counts = countSubtaskPlanItems(plan.items);
+  return [
+    `subtask plan: ${plan.items.length} item(s), ${counts.suggested} suggested, ${counts.created} created, ${counts.skipped} skipped`,
+    `mode: ${plan.mode}`,
+    plan.items.length > 0 ? ["suggestions:", ...plan.items.slice(0, max).map(item => `- ${item.id} [${item.status}] ${item.title}${item.childTaskId ? ` -> ${item.childTaskId}` : ""}`)].join("\n") : "suggestions: none",
+  ].join("\n");
+}
+
+function formatSubtaskPlanItem(item: SubtaskPlanItem): string {
+  return [
+    `- ${item.id} [${item.status}] ${item.title}`,
+    `  - reason: ${item.reason}`,
+    `  - prompt: ${item.prompt.replace(/\r?\n/g, " ")}`,
+    item.childTaskId ? `  - child task: ${item.childTaskId}` : undefined,
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
 export function formatSubtaskTree(tree: SubtaskTree, maxDepth = 4): string {
   return [
     "# Subtask Tree",
@@ -1940,6 +2146,192 @@ export async function formatSubtaskTreeSummary(root: string, task: TaskState, ma
     `finished: ${tree.finishedTasks - (tree.root.task.status === "finished" ? 1 : 0)}`,
     nodes.length > 0 ? ["recent subtasks:", ...nodes.slice(0, max).map(node => `- ${node.task.id} [${node.task.status}/${node.task.phase}] ${node.task.title}`)].join("\n") : "recent subtasks: none",
   ].join("\n");
+}
+
+function normalizeSubtaskPlan(value: Partial<SubtaskPlan> | undefined): SubtaskPlan | undefined {
+  if (!value || typeof value.taskId !== "string" || typeof value.generatedAt !== "string" || typeof value.updatedAt !== "string") {
+    return undefined;
+  }
+  const mode = isAutoSubtaskMode(value.mode) ? value.mode : "suggest";
+  const items = Array.isArray(value.items)
+    ? value.items.map(normalizeSubtaskPlanItem).filter((item): item is SubtaskPlanItem => !!item).slice(0, 12)
+    : [];
+  return {
+    taskId: value.taskId,
+    mode,
+    generatedAt: value.generatedAt,
+    updatedAt: value.updatedAt,
+    generatedFrom: typeof value.generatedFrom === "string" ? value.generatedFrom : undefined,
+    summary: typeof value.summary === "string" && value.summary.trim() ? value.summary : summarizeSubtaskPlan(items, mode),
+    items,
+  };
+}
+
+function normalizeSubtaskPlanItem(value: unknown): SubtaskPlanItem | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || typeof record.title !== "string" || typeof record.prompt !== "string") return undefined;
+  return {
+    id: record.id,
+    title: record.title.trim() || record.id,
+    prompt: record.prompt.trim(),
+    reason: typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : "Suggested from the parent task.",
+    status: isSubtaskPlanItemStatus(record.status) ? record.status : "suggested",
+    childTaskId: typeof record.childTaskId === "string" && record.childTaskId.trim() ? record.childTaskId.trim() : undefined,
+    createdAt: typeof record.createdAt === "string" ? record.createdAt : undefined,
+  };
+}
+
+function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPrd>, now: string): SubtaskPlanItem[] {
+  const candidates: Array<{ title: string; prompt: string; reason: string }> = [];
+  const goal = prd.goal || task.title;
+  const acceptance = prd.acceptanceCriteria.filter(item => item.trim()).slice(0, 6);
+  const constraints = prd.constraints.filter(item => item !== "Keep changes scoped to the requested workflow.").slice(0, 4);
+  const openQuestions = prd.openQuestions.filter(isMeaningfulOpenQuestion).slice(0, 3);
+  const explicitAcceptanceCount = countExplicitAcceptanceCriteria(task.initialPrompt);
+  const complexEnough = shouldSuggestResearchSubtask(task, prd) ||
+    explicitAcceptanceCount >= 2 ||
+    openQuestions.length > 0 ||
+    isComplexSubtaskPrompt(task.initialPrompt);
+  if (!complexEnough) return [];
+
+  if (shouldSuggestResearchSubtask(task, prd)) {
+    candidates.push({
+      title: `Research ${shortTaskTitle(goal)}`,
+      prompt: formatSuggestedSubtaskPrompt("Research", goal, [
+        "Inspect relevant code, specs, and upstream notes.",
+        "Record findings, risks, and open questions in research artifacts.",
+        "Identify implementation boundaries before code changes.",
+      ], constraints),
+      reason: "Complex or uncertain task benefits from a separate research pass.",
+    });
+  }
+
+  for (const criterion of acceptance.slice(0, 4)) {
+    candidates.push({
+      title: shortTaskTitle(criterion),
+      prompt: formatSuggestedSubtaskPrompt("Implement", criterion, [
+        criterion,
+        `Keep alignment with parent goal: ${goal}`,
+        "Update plan, acceptance, and handoff artifacts as work progresses.",
+      ], constraints),
+      reason: "Acceptance criterion can be tracked as an independently finishable child task.",
+    });
+  }
+
+  if (openQuestions.length > 0) {
+    candidates.push({
+      title: `Clarify ${shortTaskTitle(openQuestions[0])}`,
+      prompt: formatSuggestedSubtaskPrompt("Clarify", goal, [
+        ...openQuestions.map(question => `Resolve open question: ${question}`),
+        "Update PRD and acceptance criteria with the answer.",
+      ], constraints),
+      reason: "Open questions should be settled before deeper implementation.",
+    });
+  }
+
+  if (explicitAcceptanceCount >= 2 || isComplexSubtaskPrompt(task.initialPrompt)) {
+    candidates.push({
+      title: `Verify ${shortTaskTitle(goal)}`,
+      prompt: formatSuggestedSubtaskPrompt("Verify", goal, [
+        "Run or document targeted lint, typecheck, and test commands.",
+        "Record verification evidence and remaining gaps.",
+        "Confirm child tasks satisfy parent acceptance criteria.",
+      ], constraints),
+      reason: "Complex task should have a distinct verification pass.",
+    });
+  }
+
+  return dedupeSubtaskCandidates(candidates).slice(0, 6).map((candidate, index) => ({
+    id: `S${index + 1}`,
+    title: candidate.title,
+    prompt: candidate.prompt,
+    reason: candidate.reason,
+    status: "suggested",
+    createdAt: now,
+  }));
+}
+
+function shouldSuggestResearchSubtask(task: TaskState, prd: ReturnType<typeof extractPrd>): boolean {
+  return isComplexSubtaskPrompt(task.initialPrompt) ||
+    prd.openQuestions.some(isMeaningfulOpenQuestion) ||
+    /(research|investigate|architecture|design|upstream|迁移|兼容|调研|研究|架构|设计|上游)/i.test(task.initialPrompt);
+}
+
+function isComplexSubtaskPrompt(prompt: string): boolean {
+  const lines = prompt.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const listLines = lines.filter(line => /^[-*+]\s+|\d+[.)]\s+/.test(line));
+  return lines.length >= 5 ||
+    listLines.length >= 3 ||
+    /(multi|multiple|several|end-to-end|framework|workflow|architecture|orchestration|复杂|完整|全部|多个|流程|框架|编排)/i.test(prompt);
+}
+
+function countExplicitAcceptanceCriteria(prompt: string): number {
+  return prompt
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => /(\[ \]|\[x\]|验收|acceptance|criteria)/i.test(line))
+    .length;
+}
+
+function formatSuggestedSubtaskPrompt(kind: string, goal: string, acceptance: string[], constraints: string[]): string {
+  return [
+    `${kind}: ${goal}`,
+    ...constraints.map(item => `- Constraint: ${item}`),
+    ...acceptance.map(item => `- Acceptance: ${item}`),
+  ].join("\n");
+}
+
+function dedupeSubtaskCandidates(candidates: Array<{ title: string; prompt: string; reason: string }>): Array<{ title: string; prompt: string; reason: string }> {
+  const seen = new Set<string>();
+  const result: Array<{ title: string; prompt: string; reason: string }> = [];
+  for (const candidate of candidates) {
+    const key = normalizeSubtaskPromptKey(candidate.prompt);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(candidate);
+  }
+  return result;
+}
+
+function normalizeSubtaskPromptKey(prompt: string): string {
+  return prompt.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function summarizeSubtaskPlan(items: SubtaskPlanItem[], mode: AutoSubtaskMode): string {
+  if (items.length === 0) return "No subtask suggestions generated.";
+  const counts = countSubtaskPlanItems(items);
+  const modeText = mode === "auto"
+    ? "Auto mode creates suggested child tasks after planning."
+    : mode === "suggest"
+      ? "Suggest mode records child task proposals for review."
+      : "Subtask planning is disabled.";
+  return `${items.length} suggested child task(s). ${counts.created} created, ${counts.suggested} pending review. ${modeText}`;
+}
+
+function countSubtaskPlanItems(items: SubtaskPlanItem[]): Record<SubtaskPlanItemStatus, number> {
+  return {
+    suggested: items.filter(item => item.status === "suggested").length,
+    created: items.filter(item => item.status === "created").length,
+    skipped: items.filter(item => item.status === "skipped").length,
+  };
+}
+
+function shortTaskTitle(input: string): string {
+  const cleaned = input
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^(验收|acceptance|criteria|constraint):\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length > 72 ? `${cleaned.slice(0, 69)}...` : cleaned || "Project Flow subtask";
+}
+
+function isAutoSubtaskMode(value: unknown): value is AutoSubtaskMode {
+  return value === "off" || value === "suggest" || value === "auto";
+}
+
+function isSubtaskPlanItemStatus(value: unknown): value is SubtaskPlanItemStatus {
+  return value === "suggested" || value === "created" || value === "skipped";
 }
 
 export async function finishActiveTask(root: string, note?: string, options: { force?: boolean } = {}): Promise<TaskState | undefined> {
@@ -2474,9 +2866,10 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const research = snapshot?.research;
   const info = snapshot?.info;
   const subtaskSummary = task ? await formatSubtaskTreeSummary(root, task, 8) : undefined;
+  const subtaskPlan = task ? await readSubtaskPlan(root, task.id) : undefined;
   const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, subtaskSummary, research, info, upstreamReport);
-  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, research, info, upstreamReport, content };
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, subtaskSummary, subtaskPlan, research, info, upstreamReport);
+  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, subtaskPlan, research, info, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -2492,6 +2885,7 @@ export function formatContextBundle(
   snapshot?: TaskSnapshot,
   clarification?: ClarificationState,
   subtasks?: string,
+  subtaskPlan?: SubtaskPlan,
   research?: ResearchState,
   info?: string,
   upstreamReport?: UpstreamSyncReport,
@@ -2521,6 +2915,9 @@ export function formatContextBundle(
     }
     if (subtasks && subtasks !== "No subtasks recorded.") {
       lines.push("", "Subtasks:", subtasks);
+    }
+    if (subtaskPlan && subtaskPlan.items.length > 0) {
+      lines.push("", "Subtask plan:", formatSubtaskPlanSummary(subtaskPlan, 6));
     }
     if (acceptance) {
       lines.push("", "Acceptance:", formatAcceptanceSummary(acceptance, 6));
@@ -3144,6 +3541,7 @@ function formatTaskInfo(
   research: ResearchState | undefined,
   clarification: ClarificationState | undefined,
   subtaskSummary: string,
+  subtaskPlan: SubtaskPlan | undefined,
   reason: string,
 ): string {
   return [
@@ -3167,6 +3565,10 @@ function formatTaskInfo(
     "## Subtasks",
     "",
     subtaskSummary,
+    "",
+    "## Subtask Plan",
+    "",
+    subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
     "",
     "## Research",
     "",
@@ -3928,6 +4330,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
   const readiness = await writeTaskReadiness(root, currentTask, reason);
   const info = await writeTaskInfo(root, currentTask, reason);
   const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
+  const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
   const recentEvents = events.slice(-20).map(event => ({
     type: event.type,
     timestamp: event.timestamp,
@@ -3952,6 +4355,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     touchedFiles: resume.touchedFiles,
     clarification,
     subtasks: subtaskSummary,
+    subtaskPlan,
     research,
     info,
     handoff,
@@ -3988,6 +4392,10 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "## Subtasks",
     "",
     snapshot.subtasks || "No subtasks recorded.",
+    "",
+    "## Subtask Plan",
+    "",
+    snapshot.subtaskPlan ? formatSubtaskPlanSummary(snapshot.subtaskPlan, 12) : "No subtask plan recorded yet.",
     "",
     "## Clarification",
     "",
@@ -4045,6 +4453,7 @@ export function formatSnapshotSummary(snapshot: TaskSnapshot): string {
     `readiness: ${snapshot.readiness.status}`,
     snapshot.task.metadata ? `metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : undefined,
     snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `subtasks: ${snapshot.subtasks.split(/\r?\n/)[0]}` : undefined,
+    snapshot.subtaskPlan && snapshot.subtaskPlan.items.length > 0 ? `subtask plan: ${countSubtaskPlanItems(snapshot.subtaskPlan.items).suggested} suggested` : undefined,
     snapshot.clarification ? `clarification: ${snapshot.clarification.status}` : undefined,
     `acceptance: ${snapshot.acceptance.items.filter(item => item.status === "done").length}/${snapshot.acceptance.items.length} done`,
     `verification: ${snapshot.verification.checks.length} check(s)`,
@@ -4060,6 +4469,7 @@ function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
     `- readiness: ${snapshot.readiness.status}`,
     snapshot.task.metadata ? `- metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : "- metadata: none",
     snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `- subtasks: ${snapshot.subtasks.replace(/\r?\n/g, "; ")}` : "- subtasks: none",
+    snapshot.subtaskPlan && snapshot.subtaskPlan.items.length > 0 ? `- subtask plan: ${formatSubtaskPlanSummary(snapshot.subtaskPlan, 4).replace(/\r?\n/g, "; ")}` : "- subtask plan: none",
     snapshot.clarification ? `- clarification: ${snapshot.clarification.status}, ${openClarificationQuestions(snapshot.clarification).length} open` : "- clarification: none",
     `- touched files: ${snapshot.touchedFiles.slice(0, 8).join(", ") || "none inferred"}`,
   ].join("\n");

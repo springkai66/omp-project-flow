@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import projectFlowExtension from "../src/index";
-import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readTaskClarification, readTaskResearch, readVerification } from "../src/core";
+import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readSubtaskPlan, readTaskClarification, readTaskResearch, readVerification } from "../src/core";
 
 type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
@@ -71,6 +71,7 @@ describe("project flow extension", () => {
       expect(fake.commands.has("task:metadata")).toBe(true);
       expect(fake.commands.has("task:child")).toBe(true);
       expect(fake.commands.has("task:tree")).toBe(true);
+      expect(fake.commands.has("task:subtasks")).toBe(true);
       expect(fake.commands.has("task:clarify")).toBe(true);
       expect(fake.commands.has("clarify:start")).toBe(true);
       expect(fake.commands.has("clarify:status")).toBe(true);
@@ -306,6 +307,31 @@ describe("project flow extension", () => {
       await fake.commands.get("task:tree").handler("", fake.ctx(root));
       expect(fake.notifications.at(-1)?.message).toContain("# Subtask Tree");
       expect(fake.notifications.at(-1)?.message).toContain(active?.metadata?.relationships.childTaskIds[0] || "");
+    });
+  });
+
+  test("shows and applies subtask plans through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, [
+        "implement command subtask planning",
+        "- Acceptance: show subtask suggestions",
+        "- Acceptance: create child tasks from suggestions",
+        "- Acceptance: preserve parent active task",
+      ].join("\n"));
+
+      await fake.commands.get("task:subtasks").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("subtask plan:");
+      expect(fake.notifications.at(-1)?.message).toContain("suggested");
+
+      await fake.commands.get("task:subtasks").handler("--apply", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("Created");
+      const plan = await readSubtaskPlan(root, task.id);
+      expect(plan?.items.some(item => item.status === "created")).toBe(true);
+      const active = await loadActiveTask(root);
+      expect(active?.id).toBe(task.id);
     });
   });
 
