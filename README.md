@@ -1,5 +1,7 @@
 # omp-project-flow
 
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
 Project Flow workspace, task workflow, and spec injection for Oh My Pi.
 
 Status: preview / beta. This repository is intended for local Oh My Pi plugin installation, not npm publishing.
