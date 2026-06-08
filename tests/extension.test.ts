@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import projectFlowExtension from "../src/index";
-import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readTaskResearch, readVerification } from "../src/core";
+import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readTaskClarification, readTaskResearch, readVerification } from "../src/core";
 
 type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
@@ -68,6 +68,12 @@ describe("project flow extension", () => {
       expect(fake.commands.has("task:switch")).toBe(true);
       expect(fake.commands.has("task:handoff")).toBe(true);
       expect(fake.commands.has("task:info")).toBe(true);
+      expect(fake.commands.has("task:clarify")).toBe(true);
+      expect(fake.commands.has("clarify:start")).toBe(true);
+      expect(fake.commands.has("clarify:status")).toBe(true);
+      expect(fake.commands.has("clarify:answer")).toBe(true);
+      expect(fake.commands.has("clarify:skip")).toBe(true);
+      expect(fake.commands.has("clarify:finish")).toBe(true);
       expect(fake.commands.has("research:status")).toBe(true);
       expect(fake.commands.has("research:add")).toBe(true);
       expect(fake.commands.has("verify:status")).toBe(true);
@@ -264,6 +270,110 @@ describe("project flow extension", () => {
       await fake.commands.get("task:info").handler("", fake.ctx(root));
       expect(fake.notifications.at(-1)?.message).toContain("# Task Info");
       expect(fake.notifications.at(-1)?.message).toContain("## Manual Notes");
+    });
+  });
+
+  test("runs clarification through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "实现澄清命令\n- 验收: 可以回答问题\n是否需要兼容旧配置？");
+      await fake.commands.get("task:clarify").handler("", fake.ctx(root));
+
+      expect(fake.notifications.at(-1)?.message).toContain("current: C1");
+      expect(fake.sentMessages.at(-1)?.message.customType).toBe("project-flow-clarify");
+      expect(fake.sentMessages.at(-1)?.message.content).toContain("Question C1");
+
+      await fake.commands.get("task:clarify").handler("需要兼容旧配置", fake.ctx(root));
+      const clarification = await readTaskClarification(root, task.id);
+      expect(clarification?.status).toBe("ready");
+      expect(clarification?.questions[0]?.answer).toBe("需要兼容旧配置");
+      expect(fake.notifications.at(-1)?.message).toContain("status: ready");
+    });
+  });
+
+  test("does not capture the internal clarification prompt as an answer", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "实现澄清提示\n- 验收: 内部提示不会自答\n是否需要保留旧行为？");
+      await fake.commands.get("task:clarify").handler("", fake.ctx(root));
+      const prompt = fake.sentMessages.at(-1)?.message.content;
+      expect(prompt).toContain("Continue Project Flow clarification");
+
+      const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0];
+      await beforeAgentStart?.(
+        {
+          type: "before_agent_start",
+          prompt,
+          systemPrompt: [],
+        },
+        fake.ctx(root),
+      );
+
+      const clarification = await readTaskClarification(root, task.id);
+      expect(clarification?.status).toBe("collecting");
+      expect(clarification?.questions[0]?.status).toBe("asking");
+      expect(clarification?.questions[0]?.answer).toBeUndefined();
+    });
+  });
+
+  test("task clarify status does not mutate old tasks without clarification artifacts", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "implement legacy task");
+      const taskDir = path.join(root, ".project-flow", "tasks", task.id);
+      await rm(path.join(taskDir, "clarification.json"), { force: true });
+      await rm(path.join(taskDir, "clarification.md"), { force: true });
+
+      await fake.commands.get("task:clarify").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("No clarification artifact");
+      expect(await readTaskClarification(root, task.id)).toBeUndefined();
+    });
+  });
+
+  test("compact clarification treats skip and finish words as answers unless they are flags", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "实现澄清答案解析\n- 验收: 普通答案不被命令吞掉\n是否跳过迁移？");
+      await fake.commands.get("task:clarify").handler("skip migration is not allowed", fake.ctx(root));
+
+      const clarification = await readTaskClarification(root, task.id);
+      expect(clarification?.status).toBe("ready");
+      expect(clarification?.questions[0]?.status).toBe("answered");
+      expect(clarification?.questions[0]?.answer).toBe("skip migration is not allowed");
+    });
+  });
+
+  test("captures the next user prompt as a clarification answer before agent start", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "实现自动澄清\n- 验收: 下一轮回答会被记录\n是否需要迁移旧数据？");
+      const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0];
+      const result = await beforeAgentStart?.(
+        {
+          type: "before_agent_start",
+          prompt: "需要迁移旧数据，并保留旧字段读取。",
+          systemPrompt: [],
+        },
+        fake.ctx(root),
+      );
+
+      const active = await loadActiveTask(root);
+      expect(active?.id).toBe(task.id);
+      const clarification = await readTaskClarification(root, task.id);
+      expect(clarification?.status).toBe("ready");
+      expect(clarification?.questions[0]?.answer).toContain("需要迁移旧数据");
+      expect(result?.message?.content).toContain("Clarification loop:");
+      expect(result?.message?.content).toContain("status: ready");
     });
   });
 

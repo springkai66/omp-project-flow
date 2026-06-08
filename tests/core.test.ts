@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   buildContextBundle,
   addTaskResearchNote,
+  answerTaskClarification,
   applySpecProposal,
   createSpecProposal,
   createTask,
@@ -22,6 +23,7 @@ import {
   readTaskResume,
   readTaskSnapshot,
   readTaskHandoff,
+  readTaskClarification,
   readTaskEvents,
   readTaskInfo,
   readTaskResearch,
@@ -34,9 +36,12 @@ import {
   resolveTask,
   resolveSpecProposal,
   setActiveTask,
+  skipTaskClarification,
+  startTaskClarification,
   advancePlan,
   updateAcceptanceItem,
   updateUpstreamSource,
+  finishTaskClarification,
   writeProjectOverview,
   writeTaskReadiness,
   writeTaskResume,
@@ -127,10 +132,79 @@ describe("project flow core", () => {
       expect(researchNotes).toContain("# Research Notes");
       expect(researchNotes).toContain("是否需要迁移旧数据？");
 
+      const clarification = await readTaskClarification(root, task.id);
+      expect(clarification?.status).toBe("collecting");
+      expect(clarification?.currentQuestionId).toBe("C1");
+      expect(clarification?.questions[0]?.text).toBe("是否需要迁移旧数据？");
+      const clarificationMd = await readFile(path.join(paths.tasksDir, task.id, "clarification.md"), "utf8");
+      expect(clarificationMd).toContain("# Clarification Loop");
+      expect(clarificationMd).toContain("是否需要迁移旧数据？");
+
       const info = await readTaskInfo(root, task.id);
       expect(info).toContain("# Task Info");
+      expect(info).toContain("## Clarification");
       expect(info).toContain("## Research");
       expect(info).toContain("## Manual Notes");
+    });
+  });
+
+  test("runs clarification questions through answer, skip, context, readiness, and snapshot", async () => {
+    await withTempProject(async root => {
+      const paths = await ensureProject(root);
+      const task = await createTask(root, "实现设置迁移\n- 验收: 新配置可用\n是否需要兼容旧配置？");
+
+      const blocked = await writeTaskReadiness(root, task, "test");
+      expect(blocked.blockers.join("\n")).toContain("required clarification");
+
+      const answered = await answerTaskClarification(root, task.id, "需要兼容旧配置，并保留旧字段读取。");
+      expect(answered.status).toBe("updated");
+      expect(answered.state?.status).toBe("ready");
+      expect(answered.state?.questions[0]?.status).toBe("answered");
+
+      const readiness = await writeTaskReadiness(root, task, "test");
+      expect(readiness.blockers.join("\n")).not.toContain("required clarification");
+      expect(readiness.passes.join("\n")).toContain("Clarification ready");
+
+      const bundle = await buildContextBundle(root, "继续设置迁移", task);
+      expect(bundle.clarification?.status).toBe("ready");
+      expect(bundle.content).toContain("Clarification loop:");
+      expect(bundle.content).toContain("需要兼容旧配置");
+
+      const snapshot = await writeTaskSnapshot(root, task, "test");
+      expect(snapshot.clarification?.status).toBe("ready");
+      expect(snapshot.summary).toContain("Clarification is ready");
+      const snapshotMd = await readFile(path.join(paths.tasksDir, task.id, "snapshot.md"), "utf8");
+      expect(snapshotMd).toContain("## Clarification");
+
+      const prd = await readFile(path.join(paths.tasksDir, task.id, "prd.md"), "utf8");
+      expect(prd).toContain("### Answers");
+      expect(prd).toContain("需要兼容旧配置");
+    });
+  });
+
+  test("starts optional clarification and can skip or force finish it", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "implement optional brainstorm");
+      expect((await readTaskClarification(root, task.id))?.status).toBe("not_required");
+
+      const started = await startTaskClarification(root, task.id, { maxQuestions: 2 });
+      expect(started?.status).toBe("collecting");
+      expect(started?.questions).toHaveLength(2);
+      expect(started?.currentQuestionId).toBe("C1");
+
+      const skipped = await skipTaskClarification(root, task.id, "already clear");
+      expect(skipped.state?.questions[0]?.status).toBe("skipped");
+      expect(skipped.state?.currentQuestionId).toBe("C2");
+
+      const blockedFinish = await finishTaskClarification(root, task.id);
+      expect(blockedFinish.status).toBe("blocked");
+      expect(blockedFinish.openQuestions[0]?.id).toBe("C2");
+
+      const forced = await finishTaskClarification(root, task.id, { force: true, note: "not needed now" });
+      expect(forced.status).toBe("updated");
+      expect(forced.state?.status).toBe("skipped");
+      expect(forced.state?.questions[1]?.status).toBe("skipped");
     });
   });
 

@@ -57,6 +57,7 @@ export interface ContextBundle {
   root: string;
   task?: TaskState;
   specs: SpecDocument[];
+  clarification?: ClarificationState;
   acceptance?: AcceptanceState;
   plan?: PlanState;
   verificationStrategy?: VerificationStrategy;
@@ -122,6 +123,7 @@ export interface TaskSnapshot {
   readiness: ReadinessState;
   recentEvents: ResumeState["recentEvents"];
   touchedFiles: string[];
+  clarification?: ClarificationState;
   research?: ResearchState;
   info?: string;
   handoff?: string;
@@ -142,6 +144,59 @@ export interface ResearchState {
   openQuestions: string[];
   decisions: string[];
   items: ResearchItem[];
+}
+
+export type ClarificationStatus = "not_required" | "collecting" | "ready" | "skipped";
+export type ClarificationQuestionStatus = "queued" | "asking" | "answered" | "skipped";
+export type ClarificationAxis =
+  | "goal"
+  | "scope"
+  | "users"
+  | "acceptance"
+  | "constraints"
+  | "non_goals"
+  | "verification"
+  | "risk";
+
+export interface ClarifiedPrdDraft {
+  goal?: string;
+  scope: string[];
+  nonGoals: string[];
+  constraints: string[];
+  acceptanceCriteria: string[];
+  openQuestions: string[];
+}
+
+export interface ClarificationQuestion {
+  id: string;
+  axis: ClarificationAxis;
+  text: string;
+  status: ClarificationQuestionStatus;
+  answer?: string;
+  askedAt?: string;
+  answeredAt?: string;
+  rationale?: string;
+}
+
+export interface ClarificationState {
+  taskId: string;
+  enabled: boolean;
+  required: boolean;
+  status: ClarificationStatus;
+  updatedAt: string;
+  generatedFrom?: string;
+  currentQuestionId?: string;
+  maxQuestions: number;
+  questions: ClarificationQuestion[];
+  draft: ClarifiedPrdDraft;
+  summary?: string;
+}
+
+export interface ClarificationUpdateResult {
+  status: "updated" | "missing" | "blocked";
+  task?: TaskState;
+  state?: ClarificationState;
+  openQuestions: ClarificationQuestion[];
 }
 
 export interface ProjectOverviewTask {
@@ -341,6 +396,16 @@ const DEFAULT_CHECKPOINTS: Checkpoint[] = [
   { id: "implement", label: "Apply code changes", done: false },
   { id: "verify", label: "Run relevant checks", done: false },
   { id: "finish", label: "Write journal and archive task", done: false },
+];
+
+const DEFAULT_CLARIFICATION_MAX_QUESTIONS = 5;
+
+const DEFAULT_CLARIFICATION_QUESTIONS: Array<{ axis: ClarificationAxis; text: string }> = [
+  { axis: "goal", text: "What is the smallest acceptable outcome for this task?" },
+  { axis: "scope", text: "Which parts are in scope for this round?" },
+  { axis: "non_goals", text: "What should stay out of scope?" },
+  { axis: "constraints", text: "Are there compatibility, style, or workflow constraints to preserve?" },
+  { axis: "verification", text: "How should the result be verified before the task is considered ready?" },
 ];
 
 const CODE_WORK_PATTERNS = [
@@ -799,6 +864,204 @@ export async function readTaskInfo(root: string, taskId: string): Promise<string
   return readFile(infoPath, "utf8");
 }
 
+export async function readTaskClarification(root: string, taskId: string): Promise<ClarificationState | undefined> {
+  const clarificationPath = path.join(getProjectPaths(root).tasksDir, taskId, "clarification.json");
+  if (!(await pathExists(clarificationPath))) return undefined;
+  try {
+    const parsed = JSON.parse(await readFile(clarificationPath, "utf8")) as Partial<ClarificationState>;
+    return normalizeClarificationState(parsed);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function startTaskClarification(
+  root: string,
+  taskId: string,
+  options: { maxQuestions?: number } = {},
+): Promise<ClarificationState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+
+  const now = new Date().toISOString();
+  const maxQuestions = clampClarificationMax(options.maxQuestions);
+  const existing = await readTaskClarification(root, task.id);
+  let state = existing || createClarificationState(task.id, extractPrd(task.initialPrompt), now, "manual_start", {
+    enabled: true,
+    required: true,
+    maxQuestions,
+    seedDefaults: true,
+  });
+
+  if (existing) {
+    const questions = existing.questions.length > 0
+      ? existing.questions.slice(0, maxQuestions)
+      : buildDefaultClarificationQuestions(maxQuestions, now);
+    state = activateNextClarificationQuestion({
+      ...existing,
+      enabled: true,
+      required: true,
+      status: "collecting",
+      maxQuestions,
+      questions,
+      updatedAt: now,
+      generatedFrom: "manual_start",
+    }, now);
+  }
+
+  await persistClarificationUpdate(root, task, state, "clarification_started", { maxQuestions });
+  return state;
+}
+
+export async function answerTaskClarification(
+  root: string,
+  taskId: string,
+  answer: string,
+  source = "manual",
+): Promise<ClarificationUpdateResult> {
+  const task = await loadTask(root, taskId);
+  if (!task) return { status: "missing", openQuestions: [] };
+  const existing = await readTaskClarification(root, task.id);
+  if (!existing || !existing.currentQuestionId || existing.status !== "collecting") {
+    return { status: "blocked", task, state: existing, openQuestions: openClarificationQuestions(existing) };
+  }
+
+  const now = new Date().toISOString();
+  const current = existing.questions.find(question => question.id === existing.currentQuestionId);
+  if (!current) {
+    const repaired = activateNextClarificationQuestion(existing, now);
+    await persistClarificationUpdate(root, task, repaired, "clarification_repaired", {});
+    return { status: "blocked", task, state: repaired, openQuestions: openClarificationQuestions(repaired) };
+  }
+
+  const trimmed = answer.trim();
+  const questions = existing.questions.map(question =>
+    question.id === current.id
+      ? {
+        ...question,
+        status: "answered" as const,
+        answer: trimmed,
+        answeredAt: now,
+      }
+      : question,
+  );
+  const draft = updateClarificationDraft(existing.draft, current, trimmed);
+  const state = activateNextClarificationQuestion({
+    ...existing,
+    questions,
+    draft,
+    updatedAt: now,
+    generatedFrom: source,
+  }, now);
+
+  await persistClarificationUpdate(root, task, state, "clarification_answered", {
+    id: current.id,
+    source,
+    answer: summarizeUnknown(trimmed, 220),
+  });
+  return { status: "updated", task, state, openQuestions: openClarificationQuestions(state) };
+}
+
+export async function skipTaskClarification(
+  root: string,
+  taskId: string,
+  reason?: string,
+): Promise<ClarificationUpdateResult> {
+  const task = await loadTask(root, taskId);
+  if (!task) return { status: "missing", openQuestions: [] };
+  const existing = await readTaskClarification(root, task.id);
+  if (!existing || !existing.currentQuestionId || existing.status !== "collecting") {
+    return { status: "blocked", task, state: existing, openQuestions: openClarificationQuestions(existing) };
+  }
+
+  const now = new Date().toISOString();
+  const current = existing.questions.find(question => question.id === existing.currentQuestionId);
+  if (!current) return { status: "blocked", task, state: existing, openQuestions: openClarificationQuestions(existing) };
+
+  const questions = existing.questions.map(question =>
+    question.id === current.id
+      ? {
+        ...question,
+        status: "skipped" as const,
+        rationale: reason?.trim() || question.rationale,
+        answeredAt: now,
+      }
+      : question,
+  );
+  const state = activateNextClarificationQuestion({
+    ...existing,
+    questions,
+    updatedAt: now,
+    generatedFrom: "manual_skip",
+  }, now);
+
+  await persistClarificationUpdate(root, task, state, "clarification_skipped", {
+    id: current.id,
+    reason,
+  });
+  return { status: "updated", task, state, openQuestions: openClarificationQuestions(state) };
+}
+
+export async function finishTaskClarification(
+  root: string,
+  taskId: string,
+  options: { force?: boolean; note?: string } = {},
+): Promise<ClarificationUpdateResult> {
+  const task = await loadTask(root, taskId);
+  if (!task) return { status: "missing", openQuestions: [] };
+  const existing = await readTaskClarification(root, task.id);
+  if (!existing) {
+    const now = new Date().toISOString();
+    const state = createClarificationState(task.id, extractPrd(task.initialPrompt), now, "manual_finish", {
+      enabled: false,
+      required: false,
+    });
+    await persistClarificationUpdate(root, task, state, "clarification_finished", { note: options.note });
+    return { status: "updated", task, state, openQuestions: [] };
+  }
+
+  const openQuestions = openClarificationQuestions(existing);
+  if (openQuestions.length > 0 && !options.force) {
+    return { status: "blocked", task, state: existing, openQuestions };
+  }
+
+  const now = new Date().toISOString();
+  const forcedSkip = openQuestions.length > 0 && options.force;
+  const questions = forcedSkip
+    ? existing.questions.map(question =>
+      question.status === "queued" || question.status === "asking"
+        ? { ...question, status: "skipped" as const, rationale: options.note || question.rationale, answeredAt: now }
+        : question,
+    )
+    : existing.questions;
+  const state = finalizeClarificationState({
+    ...existing,
+    questions,
+    currentQuestionId: undefined,
+    status: forcedSkip ? "skipped" : "ready",
+    updatedAt: now,
+    generatedFrom: forcedSkip ? "manual_force_finish" : "manual_finish",
+  });
+
+  await persistClarificationUpdate(root, task, state, "clarification_finished", {
+    forced: forcedSkip,
+    note: options.note,
+  });
+  return { status: "updated", task, state, openQuestions: [] };
+}
+
+export function shouldCaptureClarificationAnswer(state: ClarificationState | undefined, prompt: string): boolean {
+  const trimmed = prompt.trim();
+  return !!state &&
+    state.enabled &&
+    state.required &&
+    state.status === "collecting" &&
+    !!state.currentQuestionId &&
+    !!trimmed &&
+    !isInternalClarificationPrompt(trimmed) &&
+    !trimmed.startsWith("/");
+}
+
 export async function addTaskResearchNote(
   root: string,
   taskId: string,
@@ -841,13 +1104,14 @@ export async function writeTaskInfo(root: string, task: TaskState, reason = "upd
   const existing = await readTaskInfo(root, task.id);
   if (existing !== undefined) return existing;
   const currentTask = await loadTask(root, task.id) || task;
-  const [acceptance, plan, verificationStrategy, research] = await Promise.all([
+  const [acceptance, plan, verificationStrategy, research, clarification] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readPlan(root, currentTask.id),
     readVerificationStrategy(root, currentTask.id),
     readTaskResearch(root, currentTask.id),
+    readTaskClarification(root, currentTask.id),
   ]);
-  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, reason);
+  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, reason);
   await writeFile(infoPath, content, "utf8");
   return content;
 }
@@ -1209,14 +1473,16 @@ export async function createTask(root: string, prompt: string): Promise<TaskStat
   const taskDir = path.join(paths.tasksDir, id);
   await mkdir(taskDir, { recursive: true });
   const prd = extractPrd(task.initialPrompt);
+  const clarification = createClarificationState(task.id, prd, now, "created");
   await writeFile(path.join(taskDir, "task.json"), `${JSON.stringify(task, null, 2)}\n`, "utf8");
-  await writeFile(path.join(taskDir, "prd.md"), formatPrd(task, prd), "utf8");
+  await writeFile(path.join(taskDir, "prd.md"), formatPrd(task, prd, clarification), "utf8");
   await writeFile(path.join(taskDir, "acceptance.json"), `${JSON.stringify(createAcceptanceState(prd, now), null, 2)}\n`, "utf8");
   const plan = createPlanState(now);
   await writePlan(root, id, plan);
   await writeFile(path.join(taskDir, "verification.json"), `${JSON.stringify({ checks: [], updatedAt: now }, null, 2)}\n`, "utf8");
   await refreshVerificationStrategy(root, id);
   await writeInitialTaskResearch(root, task, prd, now);
+  await writeClarificationFiles(root, task, clarification);
   await writeFile(paths.activeTaskPath, `${JSON.stringify({ id, updatedAt: now }, null, 2)}\n`, "utf8");
   await appendTaskEvent(root, id, { type: "task_created", timestamp: now, data: { prompt } });
   await writeTaskHandoff(root, task, "created");
@@ -1578,7 +1844,8 @@ export async function writeTaskHandoff(root: string, task: TaskState, reason = "
   const acceptance = await readAcceptance(root, task.id);
   const plan = await readPlan(root, task.id);
   const strategy = await readVerificationStrategy(root, task.id);
-  const content = formatTaskHandoff(task, verification, acceptance, plan, strategy, reason);
+  const clarification = await readTaskClarification(root, task.id);
+  const content = formatTaskHandoff(task, verification, acceptance, plan, strategy, clarification, reason);
   await writeFile(path.join(taskDir, "handoff.md"), content, "utf8");
   await writeTaskInfo(root, task, reason);
   await writeTaskResume(root, task, reason);
@@ -1647,6 +1914,7 @@ export async function createSpecProposal(root: string, taskId: string, note?: st
   const verification = await readVerification(root, taskId);
   const plan = await readPlan(root, taskId);
   const research = await readTaskResearch(root, taskId);
+  const clarification = await readTaskClarification(root, taskId);
   const now = new Date().toISOString();
   const id = `S-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${safeSlug(task.title)}`;
   const proposalPath = path.join(paths.specProposalsDir, `${id}.md`);
@@ -1663,7 +1931,7 @@ export async function createSpecProposal(root: string, taskId: string, note?: st
     targetPath,
     summary,
     content: "",
-  }, acceptance, verification, plan, note, research);
+  }, acceptance, verification, plan, note, research, clarification);
   await writeFile(proposalPath, content, "utf8");
   await appendTaskEvent(root, taskId, {
     type: "spec_proposal_created",
@@ -1742,11 +2010,12 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const resume = task ? await writeTaskResume(root, task, "context") : undefined;
   const readiness = task ? await writeTaskReadiness(root, task, "context") : undefined;
   const snapshot = task ? await writeTaskSnapshot(root, task, "context") : undefined;
+  const clarification = snapshot?.clarification;
   const research = snapshot?.research;
   const info = snapshot?.info;
   const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, research, info, upstreamReport);
-  return { root, task, specs: scored, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, research, info, upstreamReport, content };
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, research, info, upstreamReport);
+  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, research, info, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -1760,6 +2029,7 @@ export function formatContextBundle(
   resume?: ResumeState,
   readiness?: ReadinessState,
   snapshot?: TaskSnapshot,
+  clarification?: ClarificationState,
   research?: ResearchState,
   info?: string,
   upstreamReport?: UpstreamSyncReport,
@@ -1781,6 +2051,9 @@ export function formatContextBundle(
       "- checkpoints:",
       ...task.checkpoints.map(checkpoint => `  - [${checkpoint.done ? "x" : " "}] ${checkpoint.id}: ${checkpoint.label}`),
     );
+    if (clarification) {
+      lines.push("", "Clarification loop:", formatClarificationContext(clarification));
+    }
     if (acceptance) {
       lines.push("", "Acceptance:", formatAcceptanceSummary(acceptance, 6));
     }
@@ -1821,6 +2094,7 @@ export function formatContextBundle(
     "- If work changes reusable conventions, propose a spec patch instead of silently rewriting specs.",
     "- When code is changed, run or recommend the smallest relevant verification.",
     "- Do not finish a task while finish readiness is blocked unless the user explicitly asks to force finish.",
+    "- If clarification loop status is collecting, ask exactly the current clarification question and wait before planning or implementing.",
   );
 
   if (specs.length > 0) {
@@ -1844,7 +2118,7 @@ export function summarizeUnknown(value: unknown, max = 500): string {
   }
 }
 
-function formatPrd(task: TaskState, prd: ReturnType<typeof extractPrd>): string {
+function formatPrd(task: TaskState, prd: ReturnType<typeof extractPrd>, clarification?: ClarificationState): string {
   return [
     `# ${task.title}`,
     "",
@@ -1871,6 +2145,14 @@ function formatPrd(task: TaskState, prd: ReturnType<typeof extractPrd>): string 
     "",
     ...prd.openQuestions.map(item => `- ${item}`),
     "",
+    clarification ? "## Clarification Loop" : undefined,
+    clarification ? "" : undefined,
+    clarification ? formatClarificationSummary(clarification, 12) : undefined,
+    clarification ? "" : undefined,
+    clarification ? "### Answers" : undefined,
+    clarification ? "" : undefined,
+    clarification ? formatClarificationAnswers(clarification) : undefined,
+    clarification ? "" : undefined,
   ].join("\n");
 }
 
@@ -1920,6 +2202,393 @@ function extractPrd(prompt: string): {
   if (openQuestions.length === 0) openQuestions.push("None captured from the initial request.");
 
   return { goal, constraints, acceptanceCriteria, openQuestions };
+}
+
+function createClarificationState(
+  taskId: string,
+  prd: ReturnType<typeof extractPrd>,
+  now: string,
+  generatedFrom = "created",
+  options: {
+    enabled?: boolean;
+    required?: boolean;
+    maxQuestions?: number;
+    seedDefaults?: boolean;
+  } = {},
+): ClarificationState {
+  const maxQuestions = clampClarificationMax(options.maxQuestions);
+  const meaningfulOpenQuestions = prd.openQuestions.filter(isMeaningfulOpenQuestion).slice(0, maxQuestions);
+  const seedQuestions = meaningfulOpenQuestions.length > 0
+    ? meaningfulOpenQuestions.map(text => ({ axis: inferClarificationAxis(text), text }))
+    : options.seedDefaults
+      ? DEFAULT_CLARIFICATION_QUESTIONS.slice(0, maxQuestions)
+      : [];
+  const enabled = options.enabled ?? seedQuestions.length > 0;
+  const required = options.required ?? meaningfulOpenQuestions.length > 0;
+  const questions: ClarificationQuestion[] = seedQuestions.map((question, index) => ({
+    id: `C${index + 1}`,
+    axis: question.axis,
+    text: question.text,
+    status: enabled && index === 0 ? "asking" : "queued",
+    askedAt: enabled && index === 0 ? now : undefined,
+  }));
+  const state: ClarificationState = {
+    taskId,
+    enabled,
+    required,
+    status: enabled && questions.length > 0 ? "collecting" : "not_required",
+    updatedAt: now,
+    generatedFrom,
+    currentQuestionId: enabled && questions.length > 0 ? questions[0]?.id : undefined,
+    maxQuestions,
+    questions,
+    draft: {
+      goal: prd.goal,
+      scope: [],
+      nonGoals: [],
+      constraints: prd.constraints.filter(item => item !== "Keep changes scoped to the requested workflow."),
+      acceptanceCriteria: prd.acceptanceCriteria,
+      openQuestions: meaningfulOpenQuestions,
+    },
+  };
+  return finalizeClarificationState(state);
+}
+
+function buildDefaultClarificationQuestions(maxQuestions: number, now: string): ClarificationQuestion[] {
+  return DEFAULT_CLARIFICATION_QUESTIONS.slice(0, maxQuestions).map((question, index) => ({
+    id: `C${index + 1}`,
+    axis: question.axis,
+    text: question.text,
+    status: index === 0 ? "asking" : "queued",
+    askedAt: index === 0 ? now : undefined,
+  }));
+}
+
+async function persistClarificationUpdate(
+  root: string,
+  task: TaskState,
+  state: ClarificationState,
+  eventType: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await writeClarificationFiles(root, task, state);
+  await writeFile(path.join(getProjectPaths(root).tasksDir, task.id, "prd.md"), formatPrd(task, extractPrd(task.initialPrompt), state), "utf8");
+  await appendTaskEvent(root, task.id, {
+    type: eventType,
+    timestamp: new Date().toISOString(),
+    data,
+  });
+  await writeTaskHandoff(root, task, eventType);
+}
+
+async function writeClarificationFiles(root: string, task: TaskState, state: ClarificationState): Promise<void> {
+  const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
+  await mkdir(taskDir, { recursive: true });
+  const normalized = finalizeClarificationState(state);
+  await writeFile(path.join(taskDir, "clarification.json"), `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  await writeFile(path.join(taskDir, "clarification.md"), formatClarificationMarkdown(task, normalized), "utf8");
+}
+
+function normalizeClarificationState(parsed: Partial<ClarificationState>): ClarificationState | undefined {
+  if (typeof parsed.taskId !== "string" || typeof parsed.updatedAt !== "string") return undefined;
+  const maxQuestions = clampClarificationMax(parsed.maxQuestions);
+  const questions = Array.isArray(parsed.questions)
+    ? parsed.questions.map(normalizeClarificationQuestion).filter((question): question is ClarificationQuestion => !!question).slice(0, maxQuestions)
+    : [];
+  const status = isClarificationStatus(parsed.status) ? parsed.status : questions.length > 0 ? "collecting" : "not_required";
+  const state: ClarificationState = {
+    taskId: parsed.taskId,
+    enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : status !== "not_required",
+    required: typeof parsed.required === "boolean" ? parsed.required : status === "collecting",
+    status,
+    updatedAt: parsed.updatedAt,
+    generatedFrom: typeof parsed.generatedFrom === "string" ? parsed.generatedFrom : undefined,
+    currentQuestionId: typeof parsed.currentQuestionId === "string" ? parsed.currentQuestionId : undefined,
+    maxQuestions,
+    questions,
+    draft: normalizeClarificationDraft(parsed.draft),
+    summary: typeof parsed.summary === "string" ? parsed.summary : undefined,
+  };
+  return state.status === "collecting" ? activateNextClarificationQuestion(state, state.updatedAt) : finalizeClarificationState(state);
+}
+
+function normalizeClarificationQuestion(value: unknown): ClarificationQuestion | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || typeof record.text !== "string") return undefined;
+  const status = isClarificationQuestionStatus(record.status) ? record.status : "queued";
+  return {
+    id: record.id,
+    axis: isClarificationAxis(record.axis) ? record.axis : inferClarificationAxis(record.text),
+    text: record.text,
+    status,
+    answer: typeof record.answer === "string" ? record.answer : undefined,
+    askedAt: typeof record.askedAt === "string" ? record.askedAt : undefined,
+    answeredAt: typeof record.answeredAt === "string" ? record.answeredAt : undefined,
+    rationale: typeof record.rationale === "string" ? record.rationale : undefined,
+  };
+}
+
+function normalizeClarificationDraft(value: unknown): ClarifiedPrdDraft {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    goal: typeof record.goal === "string" ? record.goal : undefined,
+    scope: normalizeStringArray(record.scope),
+    nonGoals: normalizeStringArray(record.nonGoals),
+    constraints: normalizeStringArray(record.constraints),
+    acceptanceCriteria: normalizeStringArray(record.acceptanceCriteria),
+    openQuestions: normalizeStringArray(record.openQuestions),
+  };
+}
+
+function activateNextClarificationQuestion(state: ClarificationState, now: string): ClarificationState {
+  if (!state.enabled) {
+    return finalizeClarificationState({ ...state, status: "not_required", currentQuestionId: undefined });
+  }
+  if (state.status === "ready" || state.status === "skipped") return finalizeClarificationState(state);
+
+  const current = state.currentQuestionId
+    ? state.questions.find(question => question.id === state.currentQuestionId)
+    : undefined;
+  if (current?.status === "asking") {
+    return finalizeClarificationState({ ...state, status: "collecting" });
+  }
+
+  const existingAsking = state.questions.find(question => question.status === "asking");
+  if (existingAsking) {
+    return finalizeClarificationState({ ...state, status: "collecting", currentQuestionId: existingAsking.id });
+  }
+
+  const nextQueued = state.questions.find(question => question.status === "queued");
+  if (!nextQueued) {
+    return finalizeClarificationState({ ...state, status: "ready", currentQuestionId: undefined });
+  }
+
+  const questions = state.questions.map(question =>
+    question.id === nextQueued.id
+      ? { ...question, status: "asking" as const, askedAt: question.askedAt || now }
+      : question.status === "asking"
+        ? { ...question, status: "queued" as const }
+        : question,
+  );
+  return finalizeClarificationState({
+    ...state,
+    status: "collecting",
+    currentQuestionId: nextQueued.id,
+    questions,
+  });
+}
+
+function finalizeClarificationState(state: ClarificationState): ClarificationState {
+  const openQuestions = openClarificationQuestions(state);
+  const answered = state.questions.filter(question => question.status === "answered").length;
+  const skipped = state.questions.filter(question => question.status === "skipped").length;
+  const currentQuestionId = state.status === "collecting" && openQuestions.length > 0
+    ? state.currentQuestionId || openQuestions[0]?.id
+    : undefined;
+  return {
+    ...state,
+    currentQuestionId,
+    draft: {
+      ...state.draft,
+      openQuestions: openQuestions.map(question => question.text),
+    },
+    summary: `Clarification ${state.status}: ${answered} answered, ${skipped} skipped, ${openQuestions.length} open.`,
+  };
+}
+
+function updateClarificationDraft(
+  draft: ClarifiedPrdDraft,
+  question: ClarificationQuestion,
+  answer: string,
+): ClarifiedPrdDraft {
+  const next: ClarifiedPrdDraft = {
+    goal: draft.goal,
+    scope: [...draft.scope],
+    nonGoals: [...draft.nonGoals],
+    constraints: [...draft.constraints],
+    acceptanceCriteria: [...draft.acceptanceCriteria],
+    openQuestions: [...draft.openQuestions],
+  };
+
+  if (!answer.trim()) return next;
+
+  if (question.axis === "goal") next.goal = answer;
+  if (question.axis === "scope" || question.axis === "users") next.scope = dedupeStrings([...next.scope, answer]);
+  if (question.axis === "non_goals") next.nonGoals = dedupeStrings([...next.nonGoals, answer]);
+  if (question.axis === "constraints" || question.axis === "risk") next.constraints = dedupeStrings([...next.constraints, answer]);
+  if (question.axis === "acceptance") next.acceptanceCriteria = dedupeStrings([...next.acceptanceCriteria, answer]);
+  if (question.axis === "verification") next.acceptanceCriteria = dedupeStrings([...next.acceptanceCriteria, `Verification: ${answer}`]);
+  return next;
+}
+
+function openClarificationQuestions(state: ClarificationState | undefined): ClarificationQuestion[] {
+  if (!state) return [];
+  return state.questions.filter(question => question.status === "queued" || question.status === "asking");
+}
+
+function getCurrentClarificationQuestion(state: ClarificationState): ClarificationQuestion | undefined {
+  return state.currentQuestionId
+    ? state.questions.find(question => question.id === state.currentQuestionId)
+    : state.questions.find(question => question.status === "asking");
+}
+
+export function formatClarificationPrompt(task: TaskState, state: ClarificationState): string {
+  const question = getCurrentClarificationQuestion(state);
+  if (!question) {
+    return `Clarification for ${task.id} is ${state.status}.`;
+  }
+  return [
+    `Continue Project Flow clarification for ${task.id}.`,
+    "Ask exactly one question and wait for the user's answer. Do not plan or implement yet.",
+    "",
+    `Question ${question.id}: ${question.text}`,
+  ].join("\n");
+}
+
+export function formatClarificationSummary(state: ClarificationState, max = 8): string {
+  const current = getCurrentClarificationQuestion(state);
+  const lines = [
+    `status: ${state.status}`,
+    `updated: ${state.updatedAt}`,
+    `required: ${state.required ? "yes" : "no"}`,
+    `questions: ${state.questions.filter(question => question.status === "answered").length} answered, ${state.questions.filter(question => question.status === "skipped").length} skipped, ${openClarificationQuestions(state).length} open`,
+    current ? `current: ${current.id} - ${current.text}` : undefined,
+  ].filter((line): line is string => !!line);
+  const answered = state.questions.filter(question => question.status === "answered").slice(-max);
+  if (answered.length > 0) {
+    lines.push("recent answers:", ...answered.map(question => `- ${question.id}: ${summarizeUnknown(question.answer || "", 180)}`));
+  }
+  return lines.join("\n");
+}
+
+function formatClarificationMarkdown(task: TaskState, state: ClarificationState): string {
+  return [
+    "# Clarification Loop",
+    "",
+    `Task: ${task.id}`,
+    `Title: ${task.title}`,
+    `Status: ${state.status}`,
+    `Required: ${state.required ? "yes" : "no"}`,
+    `Updated: ${state.updatedAt}`,
+    state.generatedFrom ? `Reason: ${state.generatedFrom}` : undefined,
+    "",
+    "## Summary",
+    "",
+    state.summary || formatClarificationSummary(state),
+    "",
+    "## Current Question",
+    "",
+    getCurrentClarificationQuestion(state)
+      ? `- ${getCurrentClarificationQuestion(state)?.id}: ${getCurrentClarificationQuestion(state)?.text}`
+      : "No current clarification question.",
+    "",
+    "## Questions",
+    "",
+    state.questions.length === 0 ? "No clarification questions recorded." : state.questions.map(formatClarificationQuestion).join("\n"),
+    "",
+    "## Draft PRD",
+    "",
+    formatClarifiedPrdDraft(state.draft),
+    "",
+  ].filter(line => line !== undefined).join("\n");
+}
+
+function formatClarificationQuestion(question: ClarificationQuestion): string {
+  return [
+    `- [${question.status}] ${question.id} (${question.axis}): ${question.text}`,
+    question.answer ? `  - answer: ${summarizeUnknown(question.answer, 240)}` : undefined,
+    question.rationale ? `  - rationale: ${summarizeUnknown(question.rationale, 160)}` : undefined,
+  ].filter(line => line !== undefined).join("\n");
+}
+
+function formatClarifiedPrdDraft(draft: ClarifiedPrdDraft): string {
+  return [
+    `- Goal: ${draft.goal || "Not clarified."}`,
+    draft.scope.length > 0 ? `- Scope: ${draft.scope.join("; ")}` : "- Scope: not clarified.",
+    draft.nonGoals.length > 0 ? `- Non-goals: ${draft.nonGoals.join("; ")}` : "- Non-goals: not clarified.",
+    draft.constraints.length > 0 ? `- Constraints: ${draft.constraints.join("; ")}` : "- Constraints: not clarified.",
+    draft.acceptanceCriteria.length > 0 ? `- Acceptance: ${draft.acceptanceCriteria.join("; ")}` : "- Acceptance: not clarified.",
+    draft.openQuestions.length > 0 ? `- Open questions: ${draft.openQuestions.join("; ")}` : "- Open questions: none.",
+  ].join("\n");
+}
+
+function formatClarificationAnswers(state: ClarificationState): string {
+  const answered = state.questions.filter(question => question.status === "answered" || question.status === "skipped");
+  if (answered.length === 0) return "No clarification answers recorded yet.";
+  return answered.map(question => {
+    const detail = question.status === "answered"
+      ? question.answer || "answered without text"
+      : question.rationale || "skipped";
+    return `- ${question.id} [${question.status}] ${question.text}: ${summarizeUnknown(detail, 260)}`;
+  }).join("\n");
+}
+
+function formatClarificationContext(state: ClarificationState, max = 1400): string {
+  const current = getCurrentClarificationQuestion(state);
+  const lines = [
+    `- status: ${state.status}`,
+    `- required: ${state.required ? "yes" : "no"}`,
+    `- open questions: ${openClarificationQuestions(state).length}`,
+    current ? `- current question: ${current.id} - ${current.text}` : "- current question: none",
+    state.status === "collecting" && current
+      ? "- guidance: ask exactly this one clarification question and wait; do not plan or implement yet."
+      : "- guidance: proceed with the normal project workflow.",
+    state.questions.some(question => question.status === "answered")
+      ? `- recent answers: ${state.questions.filter(question => question.status === "answered").slice(-3).map(question => `${question.id} ${summarizeUnknown(question.answer || "", 120)}`).join("; ")}`
+      : "- recent answers: none",
+  ];
+  const content = lines.join("\n");
+  return content.length <= max ? content : `${content.slice(0, max)}\n[Clarification context truncated by Project Flow]`;
+}
+
+function isMeaningfulOpenQuestion(question: string): boolean {
+  const trimmed = question.trim();
+  return !!trimmed && trimmed !== "None captured from the initial request.";
+}
+
+function isInternalClarificationPrompt(prompt: string): boolean {
+  return /^Continue Project Flow clarification for\b/i.test(prompt) ||
+    /^Clarification for\s+T-\d{8}-/i.test(prompt);
+}
+
+function inferClarificationAxis(text: string): ClarificationAxis {
+  if (/(验收|acceptance|criteria|完成|done)/i.test(text)) return "acceptance";
+  if (/(测试|验证|verify|test|check|lint|typecheck)/i.test(text)) return "verification";
+  if (/(限制|约束|必须|不能|兼容|constraint|must|avoid|preserve|keep)/i.test(text)) return "constraints";
+  if (/(风险|risk|unsafe|danger)/i.test(text)) return "risk";
+  if (/(用户|角色|audience|user|persona)/i.test(text)) return "users";
+  if (/(不做|排除|scope out|non.?goal|out of scope)/i.test(text)) return "non_goals";
+  if (/(范围|scope|哪些|which|part)/i.test(text)) return "scope";
+  return "goal";
+}
+
+function clampClarificationMax(value: unknown): number {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : DEFAULT_CLARIFICATION_MAX_QUESTIONS;
+  return Math.max(1, Math.min(12, numeric));
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter(item => typeof item === "string" && item.trim()).map(item => item.trim()) : [];
+}
+
+function isClarificationStatus(value: unknown): value is ClarificationStatus {
+  return value === "not_required" || value === "collecting" || value === "ready" || value === "skipped";
+}
+
+function isClarificationQuestionStatus(value: unknown): value is ClarificationQuestionStatus {
+  return value === "queued" || value === "asking" || value === "answered" || value === "skipped";
+}
+
+function isClarificationAxis(value: unknown): value is ClarificationAxis {
+  return value === "goal" ||
+    value === "scope" ||
+    value === "users" ||
+    value === "acceptance" ||
+    value === "constraints" ||
+    value === "non_goals" ||
+    value === "verification" ||
+    value === "risk";
 }
 
 function createResearchState(
@@ -2005,6 +2674,7 @@ function formatTaskInfo(
   plan: PlanState,
   strategy: VerificationStrategy,
   research: ResearchState | undefined,
+  clarification: ClarificationState | undefined,
   reason: string,
 ): string {
   return [
@@ -2024,6 +2694,10 @@ function formatTaskInfo(
     "## Research",
     "",
     research ? formatResearchSummary(research, 12) : "No research artifact recorded yet.",
+    "",
+    "## Clarification",
+    "",
+    clarification ? formatClarificationSummary(clarification, 12) : "No clarification artifact recorded yet.",
     "",
     "## Acceptance",
     "",
@@ -2355,6 +3029,7 @@ function formatTaskHandoff(
   acceptance: AcceptanceState,
   plan: PlanState,
   strategy: VerificationStrategy,
+  clarification: ClarificationState | undefined,
   reason: string,
 ): string {
   const lastCheck = verification.checks.at(-1);
@@ -2385,6 +3060,10 @@ function formatTaskHandoff(
     "## Plan",
     "",
     formatPlanSummary(plan, 12),
+    "",
+    "## Clarification",
+    "",
+    clarification ? formatClarificationSummary(clarification, 8) : "No clarification artifact recorded yet.",
     "",
     "## Acceptance",
     "",
@@ -2745,7 +3424,7 @@ function formatOverviewTaskLine(task: ProjectOverviewTask): string {
 
 async function buildTaskSnapshot(root: string, task: TaskState, reason: string): Promise<TaskSnapshot> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [acceptance, plan, verification, verificationStrategy, events, handoff, research] = await Promise.all([
+  const [acceptance, plan, verification, verificationStrategy, events, handoff, research, clarification] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readPlan(root, currentTask.id),
     readVerification(root, currentTask.id),
@@ -2753,6 +3432,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     readTaskEvents(root, currentTask.id),
     readTaskHandoff(root, currentTask.id),
     readTaskResearch(root, currentTask.id),
+    readTaskClarification(root, currentTask.id),
   ]);
   const resume = await writeTaskResume(root, currentTask, reason);
   const readiness = await writeTaskReadiness(root, currentTask, reason);
@@ -2769,7 +3449,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     title: currentTask.title,
     status: currentTask.status,
     phase: currentTask.phase,
-    summary: summarizeSnapshot(currentTask, acceptance, plan, verification, readiness),
+    summary: summarizeSnapshot(currentTask, acceptance, plan, verification, readiness, clarification),
     task: currentTask,
     acceptance,
     plan,
@@ -2779,6 +3459,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     readiness,
     recentEvents,
     touchedFiles: resume.touchedFiles,
+    clarification,
     research,
     info,
     handoff,
@@ -2807,6 +3488,10 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "## Finish Readiness",
     "",
     formatReadinessSummary(snapshot.readiness, 6),
+    "",
+    "## Clarification",
+    "",
+    snapshot.clarification ? formatClarificationSummary(snapshot.clarification, 12) : "No clarification artifact recorded yet.",
     "",
     "## Acceptance",
     "",
@@ -2858,10 +3543,11 @@ export function formatSnapshotSummary(snapshot: TaskSnapshot): string {
     `summary: ${snapshot.summary}`,
     `next action: ${snapshot.resume.nextAction}`,
     `readiness: ${snapshot.readiness.status}`,
+    snapshot.clarification ? `clarification: ${snapshot.clarification.status}` : undefined,
     `acceptance: ${snapshot.acceptance.items.filter(item => item.status === "done").length}/${snapshot.acceptance.items.length} done`,
     `verification: ${snapshot.verification.checks.length} check(s)`,
     `touched files: ${snapshot.touchedFiles.length}`,
-  ].join("\n");
+  ].filter(line => line !== undefined).join("\n");
 }
 
 function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
@@ -2870,6 +3556,7 @@ function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
     `- summary: ${snapshot.summary}`,
     `- next action: ${snapshot.resume.nextAction}`,
     `- readiness: ${snapshot.readiness.status}`,
+    snapshot.clarification ? `- clarification: ${snapshot.clarification.status}, ${openClarificationQuestions(snapshot.clarification).length} open` : "- clarification: none",
     `- touched files: ${snapshot.touchedFiles.slice(0, 8).join(", ") || "none inferred"}`,
   ].join("\n");
   return content.length <= max ? content : `${content.slice(0, max)}\n[Snapshot truncated by Project Flow]`;
@@ -2881,6 +3568,7 @@ function summarizeSnapshot(
   plan: PlanState,
   verification: VerificationState,
   readiness: ReadinessState,
+  clarification?: ClarificationState,
 ): string {
   const doneAcceptance = acceptance.items.filter(item => item.status === "done").length;
   const donePlan = plan.steps.filter(step => step.status === "done").length;
@@ -2889,9 +3577,10 @@ function summarizeSnapshot(
     `${task.id} is ${task.status}/${task.phase}.`,
     `Acceptance ${doneAcceptance}/${acceptance.items.length} done.`,
     `Plan ${donePlan}/${plan.steps.length} done.`,
+    clarification ? `Clarification is ${clarification.status}.` : undefined,
     lastCheck ? `Latest verification ${lastCheck.success ? "passed" : "failed"}: ${lastCheck.command || lastCheck.toolName}.` : "No verification recorded.",
     `Finish readiness is ${readiness.status}.`,
-  ].join(" ");
+  ].filter(line => line !== undefined).join(" ");
 }
 
 function formatSnapshotVerification(verification: VerificationState): string {
@@ -2903,15 +3592,24 @@ function formatSnapshotVerification(verification: VerificationState): string {
 
 async function buildReadinessState(root: string, task: TaskState, reason: string): Promise<ReadinessState> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [acceptance, verification, plan] = await Promise.all([
+  const [acceptance, verification, plan, clarification] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readVerification(root, currentTask.id),
     readPlan(root, currentTask.id),
+    readTaskClarification(root, currentTask.id),
   ]);
   const blockers: string[] = [];
   const warnings: string[] = [];
   const passes: string[] = [];
   const nextActions: string[] = [];
+
+  if (clarification?.enabled && clarification.required && clarification.status === "collecting") {
+    blockers.push(`${openClarificationQuestions(clarification).length} required clarification question(s) remain open.`);
+    const current = getCurrentClarificationQuestion(clarification);
+    nextActions.push(current ? `Answer /task:clarify for ${current.id}: ${current.text}` : "Answer remaining /task:clarify questions.");
+  } else if (clarification?.enabled && (clarification.status === "ready" || clarification.status === "skipped")) {
+    passes.push(`Clarification ${clarification.status}.`);
+  }
 
   const openAcceptance = acceptance.items.filter(item => item.status === "open");
   const blockedAcceptance = acceptance.items.filter(item => item.status === "blocked");
@@ -3090,17 +3788,18 @@ function dedupeStrings(items: string[]): string[] {
 
 async function buildResumeState(root: string, task: TaskState, reason: string): Promise<ResumeState> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [events, acceptance, verification, plan] = await Promise.all([
+  const [events, acceptance, verification, plan, clarification] = await Promise.all([
     readTaskEvents(root, currentTask.id),
     readAcceptance(root, currentTask.id),
     readVerification(root, currentTask.id),
     readPlan(root, currentTask.id),
+    readTaskClarification(root, currentTask.id),
   ]);
   const failedVerificationChecks = verification.checks.filter(check => !check.success);
   return {
     taskId: currentTask.id,
     updatedAt: new Date().toISOString(),
-    nextAction: deriveNextAction(currentTask, plan, acceptance, failedVerificationChecks),
+    nextAction: deriveNextAction(currentTask, plan, acceptance, failedVerificationChecks, clarification),
     generatedFrom: reason,
     recentEvents: events.slice(-20).map(event => ({
       type: event.type,
@@ -3157,7 +3856,15 @@ function deriveNextAction(
   plan: PlanState,
   acceptance: AcceptanceState,
   failedVerificationChecks: VerificationCheck[],
+  clarification?: ClarificationState,
 ): string {
+  if (clarification?.enabled && clarification.required && clarification.status === "collecting") {
+    const current = getCurrentClarificationQuestion(clarification);
+    return current
+      ? `Answer clarification ${current.id}: ${current.text}`
+      : "Continue the clarification loop before planning or implementing.";
+  }
+
   const latestFailed = failedVerificationChecks.at(-1);
   if (latestFailed && task.phase === "verifying") {
     return `Resolve failed verification: ${latestFailed.command || latestFailed.toolName}`;
@@ -3359,6 +4066,7 @@ function formatSpecProposal(
   plan: PlanState,
   note?: string,
   research?: ResearchState,
+  clarification?: ClarificationState,
 ): string {
   const specTitle = proposal.title.replace(/^#+\s*/, "").trim() || proposal.id;
   const researchPath = research ? path.join(getProjectPaths(root).tasksDir, proposal.taskId, "info.md") : undefined;
@@ -3383,6 +4091,7 @@ function formatSpecProposal(
     `- Acceptance: ${acceptance.items.filter(item => item.status === "done").length}/${acceptance.items.length} done`,
     `- Verification: ${verification.checks.filter(check => check.success).length}/${verification.checks.length} passed`,
     `- Plan: ${plan.steps.filter(step => step.status === "done").length}/${plan.steps.length} done`,
+    clarification ? `- Clarification: ${clarification.status}, ${clarification.questions.filter(question => question.status === "answered").length} answered` : undefined,
     researchPath ? `- Research info: ${path.relative(root, researchPath).replaceAll("\\", "/")}` : undefined,
     research && research.items.length > 0 ? `- Research items: ${research.items.slice(-4).map(item => `${item.id} ${item.summary}`).join("; ")}` : undefined,
     note ? `- Note: ${note}` : undefined,

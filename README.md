@@ -11,6 +11,7 @@ This plugin provides a native project workflow for agent work:
 - durable project specs
 - reviewable spec proposals
 - task PRDs with simple goal, constraint, acceptance, and open-question extraction
+- one-question-at-a-time PRD clarification loops
 - task research artifacts and `info.md` technical notes
 - structured plan state
 - acceptance state
@@ -66,23 +67,24 @@ When a user prompt looks like code work, the extension automatically:
 
 1. creates or resumes an active task
 2. writes `.project-flow/tasks/<task-id>/prd.md`
-3. creates `research/research.json`, `research/notes.md`, and `info.md`
-4. creates `plan.json` and `plan.md`
-5. reads relevant specs from `.project-flow/spec`
-6. injects hidden project flow context before the agent starts
-7. records tool events into `events.jsonl`
-8. records test/check/lint style commands into `verification.json`
-9. suggests verification commands in `verification-strategy.json`
-10. keeps acceptance state in `acceptance.json`
-11. creates reviewable spec proposals when tasks finish
-12. refreshes a resumable `handoff.md`
-13. refreshes `resume.json` and `resume.md`
-14. refreshes `readiness.json` and `readiness.md`
-15. refreshes `snapshot.json` and `snapshot.md`
-16. refreshes project-level `workspace/overview.json` and `workspace/overview.md`
-17. blocks `/task:finish` when required finish signals are missing, unless `--force` is provided
-18. writes turn journals under `.project-flow/workspace/journals`
-19. keeps upstream sync review packs under `.project-flow/upstreams`
+3. creates `clarification.json` and `clarification.md` when open PRD questions need a one-question loop
+4. creates `research/research.json`, `research/notes.md`, and `info.md`
+5. creates `plan.json` and `plan.md`
+6. reads relevant specs from `.project-flow/spec`
+7. injects hidden project flow context before the agent starts
+8. records tool events into `events.jsonl`
+9. records test/check/lint style commands into `verification.json`
+10. suggests verification commands in `verification-strategy.json`
+11. keeps acceptance state in `acceptance.json`
+12. creates reviewable spec proposals when tasks finish
+13. refreshes a resumable `handoff.md`
+14. refreshes `resume.json` and `resume.md`
+15. refreshes `readiness.json` and `readiness.md`
+16. refreshes `snapshot.json` and `snapshot.md`
+17. refreshes project-level `workspace/overview.json` and `workspace/overview.md`
+18. blocks `/task:finish` when required finish signals are missing, unless `--force` is provided
+19. writes turn journals under `.project-flow/workspace/journals`
+20. keeps upstream sync review packs under `.project-flow/upstreams`
 
 ## Commands
 
@@ -103,8 +105,14 @@ Commands are escape hatches and diagnostics:
 /task:switch <id-prefix-or-title>
 /task:handoff [id-prefix-or-title]
 /task:info [id-prefix-or-title]
+/task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
+/clarify:start [id-prefix-or-title] [--max N]
+/clarify:status [id-prefix-or-title]
+/clarify:answer <answer>
+/clarify:skip [reason]
+/clarify:finish [--force] [note]
 /research:status [id-prefix-or-title]
 /research:add <note>
 /plan:status [id-prefix-or-title]
@@ -132,6 +140,8 @@ Commands are escape hatches and diagnostics:
 
 Normal work does not require commands. The task commands are useful when you want to inspect, resume, or switch long-running work.
 
+Clarification is automatic when the initial PRD has open questions. While a required clarification loop is collecting, the next normal user reply is recorded as the current answer, and the injected context tells the agent to ask only the next question before planning or implementing. Use `/task:clarify` for the compact command surface, or `/clarify:*` when you want explicit start/status/answer/skip/finish control.
+
 The upstream commands are for controlled upgrades when ECC or OMO changes. They refresh the local sync report, mark reviewed upstream references, or create a normal Project Flow task to adapt useful ideas.
 
 `info.md` is created once and is safe for human technical notes. Project Flow does not overwrite it after creation. `research/notes.md` is generated from `research/research.json`; add durable research notes with `/research:add` or put free-form manual notes in `info.md`.
@@ -157,6 +167,8 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
     T-YYYYMMDD-slug/
       task.json
       prd.md
+      clarification.json
+      clarification.md
       info.md
       research/
         research.json
@@ -208,6 +220,13 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.13.0
+
+- Added task PRD clarification artifacts: `clarification.json` and `clarification.md`.
+- Added `/task:clarify` and `/clarify:start/status/answer/skip/finish`.
+- The next user prompt is captured as the current clarification answer while a required clarification loop is collecting.
+- Clarification state now appears in hidden context, handoff, resume packs, readiness, snapshots, task info, PRDs, and spec proposals.
 
 ### 0.12.0
 

@@ -11,6 +11,7 @@ Project Flow 是一个面向 Oh My Pi 的项目工作流、任务状态和规范
 - 持久化项目规范
 - 可审阅的规范提案
 - 任务 PRD，并自动提取目标、约束、验收条件和开放问题
+- 一问一答式 PRD 澄清流程
 - 任务 research artifacts 和 `info.md` 技术笔记
 - 结构化计划状态
 - 验收状态
@@ -66,23 +67,24 @@ omp plugin list
 
 1. 创建或恢复 active task
 2. 写入 `.project-flow/tasks/<task-id>/prd.md`
-3. 创建 `research/research.json`、`research/notes.md` 和 `info.md`
-4. 创建 `plan.json` 和 `plan.md`
-5. 从 `.project-flow/spec` 读取相关规范
-6. 在 agent 启动前注入隐藏的 project flow context
-7. 将工具事件记录到 `events.jsonl`
-8. 将 test/check/lint 风格命令记录到 `verification.json`
-9. 在 `verification-strategy.json` 中建议验证命令
-10. 在 `acceptance.json` 中维护验收状态
-11. 任务完成时创建可审阅的 spec proposal
-12. 刷新可恢复的 `handoff.md`
-13. 刷新 `resume.json` 和 `resume.md`
-14. 刷新 `readiness.json` 和 `readiness.md`
-15. 刷新 `snapshot.json` 和 `snapshot.md`
-16. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
-17. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
-18. 将 turn journal 写入 `.project-flow/workspace/journals`
-19. 将上游同步审查包写入 `.project-flow/upstreams`
+3. 当 PRD 存在开放问题时创建 `clarification.json` 和 `clarification.md`
+4. 创建 `research/research.json`、`research/notes.md` 和 `info.md`
+5. 创建 `plan.json` 和 `plan.md`
+6. 从 `.project-flow/spec` 读取相关规范
+7. 在 agent 启动前注入隐藏的 project flow context
+8. 将工具事件记录到 `events.jsonl`
+9. 将 test/check/lint 风格命令记录到 `verification.json`
+10. 在 `verification-strategy.json` 中建议验证命令
+11. 在 `acceptance.json` 中维护验收状态
+12. 任务完成时创建可审阅的 spec proposal
+13. 刷新可恢复的 `handoff.md`
+14. 刷新 `resume.json` 和 `resume.md`
+15. 刷新 `readiness.json` 和 `readiness.md`
+16. 刷新 `snapshot.json` 和 `snapshot.md`
+17. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
+18. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
+19. 将 turn journal 写入 `.project-flow/workspace/journals`
+20. 将上游同步审查包写入 `.project-flow/upstreams`
 
 ## 命令
 
@@ -103,8 +105,14 @@ omp plugin list
 /task:switch <id-prefix-or-title>
 /task:handoff [id-prefix-or-title]
 /task:info [id-prefix-or-title]
+/task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
+/clarify:start [id-prefix-or-title] [--max N]
+/clarify:status [id-prefix-or-title]
+/clarify:answer <answer>
+/clarify:skip [reason]
+/clarify:finish [--force] [note]
 /research:status [id-prefix-or-title]
 /research:add <note>
 /plan:status [id-prefix-or-title]
@@ -132,6 +140,8 @@ omp plugin list
 
 普通工作不需要命令。任务命令适合在你想检查、恢复或切换长期任务时使用。
 
+当初始 PRD 有开放问题时，clarification 会自动进入一问一答流程。必需澄清仍在 collecting 时，下一条普通用户输入会被记录为当前问题答案，隐藏上下文会要求 agent 只问下一题，暂不进入计划或实现。日常使用 `/task:clarify` 即可；需要显式控制时可以用 `/clarify:*` 系列命令。
+
 上游命令用于 ECC 或 OMO 升级后的受控同步。它们会刷新本地同步报告、标记某个上游版本已审，或创建一个普通 Project Flow 任务来适配有价值的方案。
 
 `info.md` 会在任务创建时生成一次，之后不会被 Project Flow 自动覆盖，适合写人工技术笔记。`research/notes.md` 是从 `research/research.json` 生成的摘要；长期 research note 建议用 `/research:add` 记录，或把自由格式人工笔记写入 `info.md`。
@@ -157,6 +167,8 @@ omp plugin list
     T-YYYYMMDD-slug/
       task.json
       prd.md
+      clarification.json
+      clarification.md
       info.md
       research/
         research.json
@@ -208,6 +220,13 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.13.0
+
+- 新增任务 PRD clarification artifacts：`clarification.json` 和 `clarification.md`。
+- 新增 `/task:clarify` 和 `/clarify:start/status/answer/skip/finish`。
+- 当必需 clarification 仍在 collecting 时，下一条普通用户输入会自动记录为当前问题答案。
+- Clarification 状态现在会进入隐藏上下文、handoff、resume pack、readiness、snapshot、task info、PRD 和 spec proposal。
 
 ### 0.12.0
 

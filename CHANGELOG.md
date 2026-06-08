@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.0
+
+- Added one-question-at-a-time PRD clarification artifacts: `clarification.json` and `clarification.md`.
+- Added `/task:clarify` plus `/clarify:start`, `/clarify:status`, `/clarify:answer`, `/clarify:skip`, and `/clarify:finish`.
+- Captures the next user prompt as the current clarification answer while a required clarification loop is collecting.
+- Linked clarification state into hidden context, handoff, resume packs, readiness, snapshots, task info, PRDs, and spec proposals.
+
 ## 0.12.0
 
 - Added Trellis-style research artifacts for each task: `research/research.json`, `research/notes.md`, and `info.md`.

@@ -1,7 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ClarificationState, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
+  answerTaskClarification,
   applySpecProposal,
   buildContextBundle,
   createSpecProposal,
@@ -10,6 +12,8 @@ import {
   findProjectRoot,
   finishActiveTask,
   formatAcceptanceSummary,
+  formatClarificationPrompt,
+  formatClarificationSummary,
   formatProjectOverviewSummary,
   formatReadinessSummary,
   formatResearchSummary,
@@ -30,6 +34,7 @@ import {
   readAcceptance,
   readPlan,
   readSpecDocuments,
+  readTaskClarification,
   readTaskInfo,
   readTaskReadiness,
   readTaskResearch,
@@ -41,7 +46,11 @@ import {
   resolveSpecProposal,
   setActiveTask,
   setPlanStepStatus,
+  shouldCaptureClarificationAnswer,
+  skipTaskClarification,
+  startTaskClarification,
   summarizeUnknown,
+  finishTaskClarification,
   updateAcceptanceItem,
   writeTaskHandoff,
   writeTaskInfo,
@@ -348,6 +357,95 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       }
       const info = await writeTaskInfo(root, task, "command");
       ctx.ui.notify(trimForNotice(info), "info");
+    },
+  });
+
+  pi.registerCommand("task:clarify", {
+    description: "Show, answer, skip, or finish the active Project Flow clarification loop",
+    handler: async (args, ctx) => {
+      await handleTaskClarifyCommand(pi, ctx, args);
+    },
+  });
+
+  pi.registerCommand("clarify:start", {
+    description: "Start PRD clarification for a Project Flow task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parsed = parseClarifyStartArgs(args);
+      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const state = await startTaskClarification(root, task.id, { maxQuestions: parsed.maxQuestions });
+      if (!state) {
+        ctx.ui.notify(`Could not start clarification for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(formatClarificationSummary(state, 12), "info");
+      sendClarificationPrompt(pi, task, state);
+    },
+  });
+
+  pi.registerCommand("clarify:status", {
+    description: "Show PRD clarification status for a Project Flow task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await getTaskFromArgsOrActive(root, args);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const state = await readTaskClarification(root, task.id);
+      ctx.ui.notify(state ? formatClarificationSummary(state, 12) : `No clarification artifact recorded for ${task.id}.`, "info");
+    },
+  });
+
+  pi.registerCommand("clarify:answer", {
+    description: "Answer the current PRD clarification question",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root);
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:switch or /task:new first.", "warning");
+        return;
+      }
+      const answer = args.trim();
+      if (!answer) {
+        ctx.ui.notify("Provide an answer for the current clarification question.", "warning");
+        return;
+      }
+      const result = await answerTaskClarification(root, task.id, answer);
+      notifyClarificationResult(pi, ctx, task, result);
+    },
+  });
+
+  pi.registerCommand("clarify:skip", {
+    description: "Skip the current PRD clarification question",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root);
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:switch or /task:new first.", "warning");
+        return;
+      }
+      const result = await skipTaskClarification(root, task.id, args.trim() || undefined);
+      notifyClarificationResult(pi, ctx, task, result);
+    },
+  });
+
+  pi.registerCommand("clarify:finish", {
+    description: "Finish PRD clarification without finishing the task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root);
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:switch or /task:new first.", "warning");
+        return;
+      }
+      const parsed = parseClarifyFinishArgs(args);
+      const result = await finishTaskClarification(root, task.id, parsed);
+      notifyClarificationResult(pi, ctx, task, result);
     },
   });
 
@@ -726,7 +824,11 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     const specs = await readSpecDocuments(root);
 
     let task = active;
-    if (!task && isCodeWorkPrompt(prompt)) {
+    const activeClarification = task ? await readTaskClarification(root, task.id) : undefined;
+    if (task && task.status === "active" && shouldCaptureClarificationAnswer(activeClarification, prompt)) {
+      task = await getOrCreateActiveTask(root, prompt);
+      await answerTaskClarification(root, task.id, prompt, "user_prompt");
+    } else if (!task && isCodeWorkPrompt(prompt)) {
       task = await getOrCreateActiveTask(root, prompt);
       ctx.ui.notify(`Project Flow started ${task.id}`, "info");
     } else if (task && task.status === "active") {
@@ -811,6 +913,98 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     const result = await resolveTask(root, query);
     if (result.status === "found") return result.task;
     return undefined;
+  }
+
+  async function handleTaskClarifyCommand(pi: ExtensionAPI, ctx: ExtensionContext, args: string): Promise<void> {
+    const root = await findProjectRoot(ctx.cwd);
+    const task = await loadActiveTask(root);
+    if (!task) {
+      ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+      return;
+    }
+
+    const trimmed = args.trim();
+    if (!trimmed || trimmed === "--status") {
+      const state = await readTaskClarification(root, task.id);
+      if (!state) {
+        ctx.ui.notify(`No clarification artifact recorded for ${task.id}. Use /clarify:start to enable one.`, "info");
+        return;
+      }
+      ctx.ui.notify(formatClarificationSummary(state, 12), "info");
+      if (state.status === "collecting") sendClarificationPrompt(pi, task, state);
+      return;
+    }
+
+    if (trimmed === "--start") {
+      const state = await startTaskClarification(root, task.id);
+      if (!state) {
+        ctx.ui.notify(`Could not start clarification for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(formatClarificationSummary(state, 12), "info");
+      sendClarificationPrompt(pi, task, state);
+      return;
+    }
+
+    if (/^--skip(?:\s|$)/i.test(trimmed)) {
+      const note = trimmed.replace(/^--skip\s*/i, "").trim() || undefined;
+      const result = await skipTaskClarification(root, task.id, note);
+      notifyClarificationResult(pi, ctx, task, result);
+      return;
+    }
+
+    if (/^(--ready|--finish)(?:\s|$)/i.test(trimmed)) {
+      const force = /(?:^|\s)--force(?:\s|$)/i.test(trimmed);
+      const note = trimmed.replace(/^(--ready|--finish)\s*/i, "").replace(/(?:^|\s)--force(?:\s|$)/i, " ").trim() || undefined;
+      const result = await finishTaskClarification(root, task.id, { force, note });
+      notifyClarificationResult(pi, ctx, task, result);
+      return;
+    }
+
+    const result = await answerTaskClarification(root, task.id, trimmed);
+    notifyClarificationResult(pi, ctx, task, result);
+  }
+
+  function notifyClarificationResult(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    task: TaskState,
+    result: Awaited<ReturnType<typeof answerTaskClarification>>,
+  ): void {
+    if (result.status === "missing") {
+      ctx.ui.notify("No active Project Flow task matched the clarification update.", "warning");
+      return;
+    }
+    if (result.status === "blocked") {
+      const open = result.openQuestions.map(question => `- ${question.id}: ${question.text}`).join("\n");
+      ctx.ui.notify(
+        open ? `Clarification is blocked until open questions are handled:\n${open}` : "No current clarification question is available.",
+        "warning",
+      );
+      return;
+    }
+    if (!result.state) {
+      ctx.ui.notify("Clarification did not return an updated state.", "warning");
+      return;
+    }
+    ctx.ui.notify(formatClarificationSummary(result.state, 12), result.state.status === "collecting" ? "warning" : "info");
+    sendClarificationPrompt(pi, task, result.state);
+  }
+
+  function sendClarificationPrompt(
+    pi: ExtensionAPI,
+    task: TaskState,
+    state: ClarificationState,
+  ): void {
+    if (state.status !== "collecting") return;
+    pi.sendMessage(
+      {
+        customType: "project-flow-clarify",
+        content: formatClarificationPrompt(task, state),
+        display: true,
+      },
+      { triggerTurn: true },
+    );
   }
 
   async function updateAcceptanceFromCommand(
@@ -919,6 +1113,35 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     const force = parts.some(part => part === "--force");
     const note = parts.filter(part => part !== "--force").join(" ").trim();
     return { note: note || undefined, force };
+  }
+
+  function parseClarifyStartArgs(args: string): { query: string; maxQuestions?: number } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    let maxQuestions: number | undefined;
+    const queryParts: string[] = [];
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      if (part === "--max") {
+        const next = Number(parts[index + 1]);
+        if (Number.isFinite(next)) maxQuestions = next;
+        index += 1;
+        continue;
+      }
+      if (part.startsWith("--max=")) {
+        const next = Number(part.slice("--max=".length));
+        if (Number.isFinite(next)) maxQuestions = next;
+        continue;
+      }
+      queryParts.push(part);
+    }
+    return { query: queryParts.join(" "), maxQuestions };
+  }
+
+  function parseClarifyFinishArgs(args: string): { force?: boolean; note?: string } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const force = parts.some(part => part === "--force");
+    const note = parts.filter(part => part !== "--force").join(" ").trim();
+    return { force, note: note || undefined };
   }
 
   function parseUpstreamReviewArgs(args: string): { sourceId: string; reference: string; note?: string } {
