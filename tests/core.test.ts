@@ -20,6 +20,7 @@ import {
   readTaskResume,
   readTaskSnapshot,
   readTaskHandoff,
+  readUpstreamSyncReport,
   readVerification,
   readVerificationStrategy,
   refreshVerificationStrategy,
@@ -30,10 +31,12 @@ import {
   setActiveTask,
   advancePlan,
   updateAcceptanceItem,
+  updateUpstreamSource,
   writeProjectOverview,
   writeTaskReadiness,
   writeTaskResume,
   writeTaskSnapshot,
+  writeUpstreamSyncReport,
 } from "../src/core";
 
 async function withTempProject<T>(fn: (root: string) => Promise<T>): Promise<T> {
@@ -275,6 +278,16 @@ describe("project flow core", () => {
     });
   });
 
+  test("adds upstream sync context only for upstream-oriented work", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "review upstream ECC and OMO sync gaps");
+      const bundle = await buildContextBundle(root, "继续上游同步升级", task);
+      expect(bundle.upstreamReport?.totals.sources).toBe(2);
+      expect(bundle.content).toContain("Upstream sync:");
+    });
+  });
+
   test("writes resume packs with next action and recent task signals", async () => {
     await withTempProject(async root => {
       const paths = await ensureProject(root);
@@ -411,6 +424,30 @@ describe("project flow core", () => {
       expect(overviewMd).toContain("# Project Overview");
       expect(overviewMd).toContain("## Next Actions");
       expect(overviewMd).toContain(second.id);
+    });
+  });
+
+  test("writes upstream sync reports and tracks reviewed sources", async () => {
+    await withTempProject(async root => {
+      const paths = await ensureProject(root);
+
+      const report = await writeUpstreamSyncReport(root, "test");
+      expect(report.totals.sources).toBe(2);
+      expect(report.totals.needsReview).toBe(2);
+      expect(report.totals.missing).toBeGreaterThan(0);
+      expect(report.nextActions.some(item => item.includes("/upstream:review ecc"))).toBe(true);
+
+      const saved = await readUpstreamSyncReport(root);
+      expect(saved?.totals.sources).toBe(2);
+
+      const reportMd = await readFile(path.join(paths.upstreamsDir, "sync-report.md"), "utf8");
+      expect(reportMd).toContain("# Upstream Sync Report");
+      expect(reportMd).toContain("session-active-task");
+
+      const reviewed = await updateUpstreamSource(root, "ecc", "v1.2.3", "reviewed changelog");
+      expect(reviewed.status).toBe("updated");
+      expect(reviewed.source?.reference).toBe("v1.2.3");
+      expect(reviewed.report.totals.needsReview).toBe(1);
     });
   });
 });

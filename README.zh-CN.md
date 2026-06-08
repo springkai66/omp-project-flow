@@ -18,6 +18,7 @@ Project Flow 是一个面向 Oh My Pi 的项目工作流、任务状态和规范
 - finish readiness gate：基于验收、计划和验证信号判断是否可以收尾
 - task snapshot：用于审阅、交接、issue 和 pull request 的任务快照
 - project overview：跨 active、paused、finished、blocked 和 proposed work 的项目总览
+- upstream sync report：跟踪 ECC/OMO 启发能力和本地覆盖差距
 - workflow 状态
 - 工具调用事件日志
 - 验证记录
@@ -79,6 +80,7 @@ omp plugin list
 15. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
 16. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
 17. 将 turn journal 写入 `.project-flow/workspace/journals`
+18. 将上游同步审查包写入 `.project-flow/upstreams`
 
 ## 命令
 
@@ -117,9 +119,15 @@ omp plugin list
 /spec:show <id-prefix-or-title>
 /spec:apply <id-prefix-or-title>
 /sources:check
+/upstream:status
+/upstream:report
+/upstream:review <source-id> <reference> [note]
+/upstream:sync [note]
 ```
 
 普通工作不需要命令。任务命令适合在你想检查、恢复或切换长期任务时使用。
+
+上游命令用于 ECC 或 OMO 升级后的受控同步。它们会刷新本地同步报告、标记某个上游版本已审，或创建一个普通 Project Flow 任务来适配有价值的方案。
 
 ## 项目目录
 
@@ -129,6 +137,11 @@ omp plugin list
     README.md
   spec-proposals/
     S-YYYYMMDD-slug.md
+  upstreams/
+    sources.json
+    capabilities.json
+    sync-report.json
+    sync-report.md
   workspace/
     overview.json
     overview.md
@@ -166,6 +179,10 @@ Spec proposal 会保存在 `.project-flow/spec-proposals/` 下供审阅。除非
 
 规范更新会被建议出来，而不是静默应用。
 
+上游同步也是受控流程。Project Flow 会跟踪上游来源和能力覆盖状态，但不会自动合并或执行上游代码。
+
+审查流程见 [docs/upstream-sync.md](./docs/upstream-sync.md)。
+
 ## 开发
 
 ```powershell
@@ -180,6 +197,13 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.11.0
+
+- 新增 `.project-flow/upstreams/` 上游同步状态。
+- 新增 `sources.json`、`capabilities.json`、`sync-report.json` 和 `sync-report.md`。
+- 新增 `/upstream:status`、`/upstream:report`、`/upstream:review` 和 `/upstream:sync`。
+- 当存在待审上游同步工作时，隐藏上下文会包含紧凑的 upstream sync next actions。
 
 ### 0.10.0
 

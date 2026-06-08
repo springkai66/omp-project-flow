@@ -10,6 +10,7 @@ export interface ProjectPaths {
   flowDir: string;
   specDir: string;
   specProposalsDir: string;
+  upstreamsDir: string;
   workspaceDir: string;
   tasksDir: string;
   workflowDir: string;
@@ -63,6 +64,7 @@ export interface ContextBundle {
   resume?: ResumeState;
   readiness?: ReadinessState;
   snapshot?: TaskSnapshot;
+  upstreamReport?: UpstreamSyncReport;
   content: string;
 }
 
@@ -158,6 +160,57 @@ export interface ProjectOverview {
     status: SpecProposalStatus;
     taskId: string;
   }>;
+}
+
+export type UpstreamSourceStatus = "tracked" | "needs-review" | "ignored";
+export type UpstreamCapabilityStatus = "covered" | "partial" | "missing" | "watch";
+export type UpstreamRisk = "low" | "medium" | "high";
+
+export interface UpstreamSource {
+  id: string;
+  name: string;
+  status: UpstreamSourceStatus;
+  url?: string;
+  reference?: string;
+  referenceUpdatedAt?: string;
+  lastReviewedAt?: string;
+  focus: string[];
+  notes: string[];
+}
+
+export interface UpstreamCapability {
+  id: string;
+  title: string;
+  upstreams: string[];
+  localStatus: UpstreamCapabilityStatus;
+  risk: UpstreamRisk;
+  localImplementation: string[];
+  nextActions: string[];
+}
+
+export interface UpstreamSyncReport {
+  root: string;
+  updatedAt: string;
+  generatedFrom?: string;
+  sources: UpstreamSource[];
+  capabilities: UpstreamCapability[];
+  totals: {
+    sources: number;
+    needsReview: number;
+    covered: number;
+    partial: number;
+    missing: number;
+    watch: number;
+  };
+  staleSources: string[];
+  watchItems: string[];
+  nextActions: string[];
+}
+
+export interface UpstreamSourceUpdateResult {
+  status: "updated" | "missing";
+  source?: UpstreamSource;
+  report: UpstreamSyncReport;
 }
 
 export interface VerificationCheck {
@@ -295,6 +348,118 @@ const VERIFY_COMMAND_PATTERNS = [
   /\bomp\s+plugin\s+doctor\b/i,
 ];
 
+const DEFAULT_UPSTREAM_SOURCES: UpstreamSource[] = [
+  {
+    id: "ecc",
+    name: "Everything Claude Code",
+    status: "tracked",
+    reference: "manual-review-required",
+    focus: [
+      "agent orchestration patterns",
+      "hook and skill composition",
+      "audit and verification packs",
+      "marketplace-style extension ideas",
+    ],
+    notes: [
+      "Use as design inspiration only; do not copy upstream code directly.",
+      "Prefer local Project Flow state and OMP command/event surfaces.",
+    ],
+  },
+  {
+    id: "omo",
+    name: "Oh My OpenAgent",
+    status: "tracked",
+    reference: "manual-review-required",
+    focus: [
+      "resumable task state",
+      "workspace memory",
+      "context assembly",
+      "workflow status conventions",
+    ],
+    notes: [
+      "Use as design inspiration only; preserve Project Flow runtime paths.",
+      "Map useful changes into reviewable local capabilities before implementation.",
+    ],
+  },
+];
+
+const DEFAULT_UPSTREAM_CAPABILITIES: UpstreamCapability[] = [
+  {
+    id: "session-active-task",
+    title: "Session-scoped active task selection",
+    upstreams: ["omo"],
+    localStatus: "missing",
+    risk: "medium",
+    localImplementation: [
+      "Project Flow currently uses one project-level active task in workflow/active-task.json.",
+    ],
+    nextActions: [
+      "Inspect whether OMP exposes a stable session id in ExtensionContext.",
+      "Add a session active-task map with project active-task fallback.",
+      "Update hidden context and task commands to prefer the current session binding.",
+    ],
+  },
+  {
+    id: "subtask-tree",
+    title: "Parent and child task breakdown",
+    upstreams: ["omo", "ecc"],
+    localStatus: "missing",
+    risk: "medium",
+    localImplementation: [
+      "Project Flow stores flat task records with structured plan steps.",
+    ],
+    nextActions: [
+      "Add optional parentTaskId and child task indexes.",
+      "Keep existing flat task commands compatible.",
+      "Summarize child readiness in task snapshots and project overview.",
+    ],
+  },
+  {
+    id: "research-artifacts",
+    title: "Research and implementation evidence packs",
+    upstreams: ["ecc"],
+    localStatus: "partial",
+    risk: "low",
+    localImplementation: [
+      "Project Flow writes PRD, handoff, resume, readiness, snapshot, and verification strategy files.",
+      "There is no separate research/info artifact yet.",
+    ],
+    nextActions: [
+      "Add research.md or info.md for source notes and decisions.",
+      "Link research artifacts from snapshots and spec proposals.",
+    ],
+  },
+  {
+    id: "verification-loop",
+    title: "Automatic verification remediation loop",
+    upstreams: ["ecc", "omo"],
+    localStatus: "partial",
+    risk: "high",
+    localImplementation: [
+      "Project Flow detects verification commands, records pass/fail, and blocks finish on failed or missing checks.",
+      "It does not automatically re-enter a fix-and-rerun loop after failed verification.",
+    ],
+    nextActions: [
+      "Design an opt-in loop that creates next actions instead of silently running commands.",
+      "Track rerun attempts and stop conditions in verification.json.",
+    ],
+  },
+  {
+    id: "extension-marketplace",
+    title: "External hook, skill, and extension catalog tracking",
+    upstreams: ["ecc"],
+    localStatus: "watch",
+    risk: "low",
+    localImplementation: [
+      "Project Flow ships as one local OMP plugin and records source policy with /sources:check.",
+    ],
+    nextActions: [
+      "Watch upstream extension catalog patterns.",
+      "Only add a catalog if Project Flow gains multiple optional modules.",
+    ],
+  },
+];
+
 export async function pathExists(target: string): Promise<boolean> {
   try {
     await stat(target);
@@ -313,6 +478,7 @@ export function getProjectPaths(root: string): ProjectPaths {
     flowDir,
     specDir: path.join(flowDir, "spec"),
     specProposalsDir: path.join(flowDir, "spec-proposals"),
+    upstreamsDir: path.join(flowDir, "upstreams"),
     workspaceDir,
     tasksDir: path.join(flowDir, "tasks"),
     workflowDir,
@@ -354,6 +520,7 @@ export async function ensureProject(root: string): Promise<ProjectPaths> {
   const paths = getProjectPaths(root);
   await mkdir(paths.specDir, { recursive: true });
   await mkdir(paths.specProposalsDir, { recursive: true });
+  await mkdir(paths.upstreamsDir, { recursive: true });
   await mkdir(paths.tasksDir, { recursive: true });
   await mkdir(paths.workflowDir, { recursive: true });
   await mkdir(paths.journalsDir, { recursive: true });
@@ -681,6 +848,196 @@ export async function writeProjectOverview(root: string): Promise<ProjectOvervie
   await writeFile(path.join(paths.workspaceDir, "overview.json"), `${JSON.stringify(overview, null, 2)}\n`, "utf8");
   await writeFile(path.join(paths.workspaceDir, "overview.md"), formatProjectOverview(overview), "utf8");
   return overview;
+}
+
+export async function readUpstreamSources(root: string): Promise<UpstreamSource[]> {
+  const paths = await ensureProject(root);
+  const sourcesPath = path.join(paths.upstreamsDir, "sources.json");
+  if (!(await pathExists(sourcesPath))) {
+    const sources = cloneDefaultUpstreamSources();
+    await writeUpstreamSources(root, sources);
+    return sources;
+  }
+  try {
+    const parsed = JSON.parse(await readFile(sourcesPath, "utf8")) as { sources?: unknown };
+    const rawSources = Array.isArray(parsed.sources) ? parsed.sources : [];
+    const sources = mergeDefaultUpstreamSources(rawSources.map(normalizeUpstreamSource).filter(isDefined));
+    await writeUpstreamSources(root, sources);
+    return sources;
+  } catch {
+    const sources = cloneDefaultUpstreamSources();
+    await writeUpstreamSources(root, sources);
+    return sources;
+  }
+}
+
+export async function writeUpstreamSources(root: string, sources: UpstreamSource[]): Promise<void> {
+  const paths = await ensureProject(root);
+  await writeFile(
+    path.join(paths.upstreamsDir, "sources.json"),
+    `${JSON.stringify({ updatedAt: new Date().toISOString(), sources }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+export async function readUpstreamCapabilities(root: string): Promise<UpstreamCapability[]> {
+  const paths = await ensureProject(root);
+  const capabilitiesPath = path.join(paths.upstreamsDir, "capabilities.json");
+  if (!(await pathExists(capabilitiesPath))) {
+    const capabilities = cloneDefaultUpstreamCapabilities();
+    await writeUpstreamCapabilities(root, capabilities);
+    return capabilities;
+  }
+  try {
+    const parsed = JSON.parse(await readFile(capabilitiesPath, "utf8")) as { capabilities?: unknown };
+    const rawCapabilities = Array.isArray(parsed.capabilities) ? parsed.capabilities : [];
+    const capabilities = mergeDefaultUpstreamCapabilities(rawCapabilities.map(normalizeUpstreamCapability).filter(isDefined));
+    await writeUpstreamCapabilities(root, capabilities);
+    return capabilities;
+  } catch {
+    const capabilities = cloneDefaultUpstreamCapabilities();
+    await writeUpstreamCapabilities(root, capabilities);
+    return capabilities;
+  }
+}
+
+export async function writeUpstreamCapabilities(root: string, capabilities: UpstreamCapability[]): Promise<void> {
+  const paths = await ensureProject(root);
+  await writeFile(
+    path.join(paths.upstreamsDir, "capabilities.json"),
+    `${JSON.stringify({ updatedAt: new Date().toISOString(), capabilities }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+export async function readUpstreamSyncReport(root: string): Promise<UpstreamSyncReport | undefined> {
+  const reportPath = path.join(getProjectPaths(root).upstreamsDir, "sync-report.json");
+  if (!(await pathExists(reportPath))) return undefined;
+  try {
+    const parsed = JSON.parse(await readFile(reportPath, "utf8")) as Partial<UpstreamSyncReport>;
+    if (
+      typeof parsed.root !== "string" ||
+      typeof parsed.updatedAt !== "string" ||
+      !parsed.totals ||
+      !Array.isArray(parsed.sources) ||
+      !Array.isArray(parsed.capabilities)
+    ) {
+      return undefined;
+    }
+    return parsed as UpstreamSyncReport;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writeUpstreamSyncReport(root: string, reason = "update"): Promise<UpstreamSyncReport> {
+  const paths = await ensureProject(root);
+  const [sources, capabilities] = await Promise.all([
+    readUpstreamSources(root),
+    readUpstreamCapabilities(root),
+  ]);
+  const report = buildUpstreamSyncReport(root, sources, capabilities, reason);
+  await writeFile(path.join(paths.upstreamsDir, "sync-report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  await writeFile(path.join(paths.upstreamsDir, "sync-report.md"), formatUpstreamSyncReport(report), "utf8");
+  return report;
+}
+
+export async function updateUpstreamSource(
+  root: string,
+  sourceId: string,
+  reference: string,
+  note?: string,
+): Promise<UpstreamSourceUpdateResult> {
+  const normalizedId = sourceId.trim().toLowerCase();
+  const sources = await readUpstreamSources(root);
+  const index = sources.findIndex(source => source.id.toLowerCase() === normalizedId);
+  if (index < 0) {
+    return { status: "missing", report: await writeUpstreamSyncReport(root, "source_missing") };
+  }
+
+  const now = new Date().toISOString();
+  const source = sources[index];
+  const updated: UpstreamSource = {
+    ...source,
+    status: "tracked",
+    reference: reference.trim(),
+    referenceUpdatedAt: now,
+    lastReviewedAt: now,
+    notes: dedupeStrings(note ? [...source.notes, note] : source.notes),
+  };
+  const nextSources = sources.map(candidate => candidate.id === source.id ? updated : candidate);
+  await writeUpstreamSources(root, nextSources);
+  return { status: "updated", source: updated, report: await writeUpstreamSyncReport(root, "source_reviewed") };
+}
+
+export function formatUpstreamSyncReport(report: UpstreamSyncReport): string {
+  return [
+    "# Upstream Sync Report",
+    "",
+    `Root: ${report.root}`,
+    `Generated: ${report.updatedAt}`,
+    report.generatedFrom ? `Reason: ${report.generatedFrom}` : undefined,
+    "",
+    "## Summary",
+    "",
+    `- Sources: ${report.totals.sources}`,
+    `- Sources needing review: ${report.totals.needsReview}`,
+    `- Capability coverage: ${report.totals.covered} covered, ${report.totals.partial} partial, ${report.totals.missing} missing, ${report.totals.watch} watch`,
+    "",
+    "## Sources",
+    "",
+    report.sources.map(formatUpstreamSourceLine).join("\n"),
+    "",
+    "## Capability Coverage",
+    "",
+    report.capabilities.map(formatUpstreamCapabilityBlock).join("\n\n"),
+    "",
+    "## Watch Items",
+    "",
+    formatResumeList(report.watchItems, "No watch items recorded."),
+    "",
+    "## Next Actions",
+    "",
+    formatResumeList(report.nextActions, "No upstream sync actions recorded."),
+    "",
+    "## Sync Policy",
+    "",
+    "- Review upstream changes before changing Project Flow behavior.",
+    "- Reimplement useful workflow ideas in Project Flow's local state model.",
+    "- Keep runtime data under `.project-flow/` and avoid OMP native config paths.",
+    "- Run `bun run check`, `bun test`, and `omp plugin doctor` after behavior changes.",
+    "",
+  ].filter(line => line !== undefined).join("\n");
+}
+
+export function formatUpstreamSyncSummary(report: UpstreamSyncReport, max = 8): string {
+  return [
+    "Upstream sync",
+    `root: ${report.root}`,
+    `updated: ${report.updatedAt}`,
+    `sources: ${report.totals.sources}, needs review: ${report.totals.needsReview}`,
+    `coverage: ${report.totals.covered} covered, ${report.totals.partial} partial, ${report.totals.missing} missing, ${report.totals.watch} watch`,
+    report.staleSources.length > 0 ? ["stale sources:", ...report.staleSources.slice(0, max).map(item => `- ${item}`)].join("\n") : "stale sources: none",
+    report.nextActions.length > 0 ? ["next actions:", ...report.nextActions.slice(0, max).map(item => `- ${item}`)].join("\n") : "next actions: none",
+  ].join("\n");
+}
+
+export function formatUpstreamTaskPrompt(report: UpstreamSyncReport, note?: string): string {
+  return [
+    "Continue Project Flow upstream sync review.",
+    note ? `User note: ${note}` : undefined,
+    "",
+    "Goal: review tracked upstream changes, decide which workflow ideas should be adapted, and update this plugin through the existing project loop.",
+    "",
+    "- Acceptance: upstream sources are reviewed or explicitly marked as still pending.",
+    "- Acceptance: missing or partial capabilities are converted into concrete Project Flow implementation tasks or documented as watch items.",
+    "- Acceptance: any code changes preserve `.project-flow/` runtime paths and local plugin independence.",
+    "- Acceptance: targeted checks pass or verification gaps are documented.",
+    "",
+    "Current upstream sync report:",
+    "",
+    formatUpstreamSyncReport(report),
+  ].filter(line => line !== undefined).join("\n");
 }
 
 export async function createTask(root: string, prompt: string): Promise<TaskState> {
@@ -1243,8 +1600,9 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const resume = task ? await writeTaskResume(root, task, "context") : undefined;
   const readiness = task ? await writeTaskReadiness(root, task, "context") : undefined;
   const snapshot = task ? await writeTaskSnapshot(root, task, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot);
-  return { root, task, specs: scored, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, content };
+  const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, upstreamReport);
+  return { root, task, specs: scored, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -1258,6 +1616,7 @@ export function formatContextBundle(
   resume?: ResumeState,
   readiness?: ReadinessState,
   snapshot?: TaskSnapshot,
+  upstreamReport?: UpstreamSyncReport,
 ): string {
   const lines: string[] = [
     "[PROJECT FLOW ACTIVE]",
@@ -1299,6 +1658,10 @@ export function formatContextBundle(
     if (handoff) {
       lines.push("", "Latest handoff:", trimHandoffContent(handoff));
     }
+  }
+
+  if (upstreamReport && upstreamReport.nextActions.length > 0) {
+    lines.push("", "Upstream sync:", formatUpstreamContext(upstreamReport));
   }
 
   lines.push(
@@ -1770,6 +2133,206 @@ function trimHandoffContent(content: string, max = 1600): string {
   return `${trimmed.slice(0, max)}\n\n[Handoff truncated by Project Flow]`;
 }
 
+function buildUpstreamSyncReport(
+  root: string,
+  sources: UpstreamSource[],
+  capabilities: UpstreamCapability[],
+  reason: string,
+): UpstreamSyncReport {
+  const activeSources = sources.filter(source => source.status !== "ignored");
+  const staleSources = activeSources
+    .filter(sourceNeedsReview)
+    .map(source => `${source.id}: ${source.name}${source.reference ? ` (${source.reference})` : ""}`);
+  const missingOrPartial = capabilities
+    .filter(capability => capability.localStatus === "missing" || capability.localStatus === "partial")
+    .sort(compareCapabilityPriority);
+  const watchItems = capabilities
+    .filter(capability => capability.localStatus === "watch" || capability.risk === "high")
+    .map(capability => `${capability.id}: ${capability.title} [${capability.localStatus}/${capability.risk}]`);
+  const nextActions = dedupeStrings([
+    ...activeSources.filter(sourceNeedsReview).map(source => `Review ${source.id} upstream changes and run /upstream:review ${source.id} <reference> when done.`),
+    ...missingOrPartial.flatMap(capability =>
+      capability.nextActions.slice(0, 1).map(action => `Plan ${capability.id}: ${action}`),
+    ),
+  ]).slice(0, 12);
+
+  return {
+    root,
+    updatedAt: new Date().toISOString(),
+    generatedFrom: reason,
+    sources,
+    capabilities,
+    totals: {
+      sources: activeSources.length,
+      needsReview: staleSources.length,
+      covered: capabilities.filter(capability => capability.localStatus === "covered").length,
+      partial: capabilities.filter(capability => capability.localStatus === "partial").length,
+      missing: capabilities.filter(capability => capability.localStatus === "missing").length,
+      watch: capabilities.filter(capability => capability.localStatus === "watch").length,
+    },
+    staleSources,
+    watchItems,
+    nextActions,
+  };
+}
+
+function sourceNeedsReview(source: UpstreamSource): boolean {
+  if (source.status === "ignored") return false;
+  if (source.status === "needs-review") return true;
+  if (!source.reference || source.reference === "manual-review-required") return true;
+  if (!source.lastReviewedAt) return true;
+  if (source.referenceUpdatedAt && source.lastReviewedAt && source.referenceUpdatedAt > source.lastReviewedAt) return true;
+  return false;
+}
+
+function compareCapabilityPriority(a: UpstreamCapability, b: UpstreamCapability): number {
+  const riskScore = (risk: UpstreamRisk) => risk === "high" ? 3 : risk === "medium" ? 2 : 1;
+  const statusScore = (status: UpstreamCapabilityStatus) => status === "missing" ? 2 : status === "partial" ? 1 : 0;
+  return (statusScore(b.localStatus) + riskScore(b.risk)) - (statusScore(a.localStatus) + riskScore(a.risk));
+}
+
+function formatUpstreamSourceLine(source: UpstreamSource): string {
+  return [
+    `- ${source.id} [${source.status}] ${source.name}`,
+    source.url ? `url: ${source.url}` : undefined,
+    `reference: ${source.reference || "unset"}`,
+    `reviewed: ${source.lastReviewedAt || "never"}`,
+    source.focus.length > 0 ? `focus: ${source.focus.join(", ")}` : undefined,
+  ].filter(Boolean).join(" - ");
+}
+
+function formatUpstreamCapabilityBlock(capability: UpstreamCapability): string {
+  return [
+    `### ${capability.id} - ${capability.title}`,
+    "",
+    `- Status: ${capability.localStatus}`,
+    `- Upstreams: ${capability.upstreams.join(", ") || "none"}`,
+    `- Risk: ${capability.risk}`,
+    "",
+    "Local implementation:",
+    "",
+    formatResumeList(capability.localImplementation, "No local implementation recorded."),
+    "",
+    "Next actions:",
+    "",
+    formatResumeList(capability.nextActions, "No next actions recorded."),
+  ].join("\n");
+}
+
+function cloneDefaultUpstreamSources(): UpstreamSource[] {
+  return DEFAULT_UPSTREAM_SOURCES.map(source => ({
+    ...source,
+    focus: [...source.focus],
+    notes: [...source.notes],
+  }));
+}
+
+function cloneDefaultUpstreamCapabilities(): UpstreamCapability[] {
+  return DEFAULT_UPSTREAM_CAPABILITIES.map(capability => ({
+    ...capability,
+    upstreams: [...capability.upstreams],
+    localImplementation: [...capability.localImplementation],
+    nextActions: [...capability.nextActions],
+  }));
+}
+
+function mergeDefaultUpstreamSources(existing: UpstreamSource[]): UpstreamSource[] {
+  const defaults = cloneDefaultUpstreamSources();
+  const byId = new Map(existing.map(source => [source.id, source]));
+  const defaultIds = new Set(defaults.map(source => source.id));
+  const merged = defaults.map(source => {
+    const override = byId.get(source.id);
+    if (!override) return source;
+    return {
+      ...source,
+      ...override,
+      focus: override.focus.length > 0 ? override.focus : source.focus,
+      notes: dedupeStrings([...source.notes, ...override.notes]),
+    };
+  });
+  const extras = existing.filter(source => !defaultIds.has(source.id));
+  return [...merged, ...extras];
+}
+
+function mergeDefaultUpstreamCapabilities(existing: UpstreamCapability[]): UpstreamCapability[] {
+  const defaults = cloneDefaultUpstreamCapabilities();
+  const byId = new Map(existing.map(capability => [capability.id, capability]));
+  const defaultIds = new Set(defaults.map(capability => capability.id));
+  const merged = defaults.map(capability => {
+    const override = byId.get(capability.id);
+    if (!override) return capability;
+    return {
+      ...capability,
+      ...override,
+      upstreams: override.upstreams.length > 0 ? override.upstreams : capability.upstreams,
+      localImplementation: override.localImplementation.length > 0 ? override.localImplementation : capability.localImplementation,
+      nextActions: override.nextActions.length > 0 ? override.nextActions : capability.nextActions,
+    };
+  });
+  const extras = existing.filter(capability => !defaultIds.has(capability.id));
+  return [...merged, ...extras];
+}
+
+function normalizeUpstreamSource(value: unknown): UpstreamSource | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" ? safeSlug(record.id) : "";
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  if (!id || !name) return undefined;
+  return {
+    id,
+    name,
+    status: parseUpstreamSourceStatus(record.status),
+    url: typeof record.url === "string" ? record.url.trim() || undefined : undefined,
+    reference: typeof record.reference === "string" ? record.reference.trim() || undefined : undefined,
+    referenceUpdatedAt: typeof record.referenceUpdatedAt === "string" ? record.referenceUpdatedAt : undefined,
+    lastReviewedAt: typeof record.lastReviewedAt === "string" ? record.lastReviewedAt : undefined,
+    focus: stringArray(record.focus),
+    notes: stringArray(record.notes),
+  };
+}
+
+function normalizeUpstreamCapability(value: unknown): UpstreamCapability | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === "string" ? safeSlug(record.id) : "";
+  const title = typeof record.title === "string" ? record.title.trim() : "";
+  if (!id || !title) return undefined;
+  return {
+    id,
+    title,
+    upstreams: stringArray(record.upstreams).map(item => safeSlug(item)).filter(Boolean),
+    localStatus: parseUpstreamCapabilityStatus(record.localStatus),
+    risk: parseUpstreamRisk(record.risk),
+    localImplementation: stringArray(record.localImplementation),
+    nextActions: stringArray(record.nextActions),
+  };
+}
+
+function parseUpstreamSourceStatus(value: unknown): UpstreamSourceStatus {
+  if (value === "tracked" || value === "needs-review" || value === "ignored") return value;
+  return "tracked";
+}
+
+function parseUpstreamCapabilityStatus(value: unknown): UpstreamCapabilityStatus {
+  if (value === "covered" || value === "partial" || value === "missing" || value === "watch") return value;
+  return "watch";
+}
+
+function parseUpstreamRisk(value: unknown): UpstreamRisk {
+  if (value === "low" || value === "medium" || value === "high") return value;
+  return "medium";
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(item => typeof item === "string").map(item => item.trim()).filter(Boolean);
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
+}
+
 async function buildProjectOverview(root: string): Promise<ProjectOverview> {
   const [tasks, active, proposals] = await Promise.all([
     listTasks(root),
@@ -2181,6 +2744,23 @@ function formatReadinessContext(readiness: ReadinessState, max = 1200): string {
   ];
   const content = lines.join("\n");
   return content.length <= max ? content : `${content.slice(0, max)}\n[Readiness truncated by Project Flow]`;
+}
+
+function formatUpstreamContext(report: UpstreamSyncReport, max = 1200): string {
+  const lines = [
+    `- updated: ${report.updatedAt}`,
+    `- sources needing review: ${report.totals.needsReview}`,
+    `- coverage: ${report.totals.covered} covered, ${report.totals.partial} partial, ${report.totals.missing} missing, ${report.totals.watch} watch`,
+    report.nextActions.length > 0 ? `- next actions: ${report.nextActions.slice(0, 4).join("; ")}` : "- next actions: none",
+  ];
+  const content = lines.join("\n");
+  return content.length <= max ? content : `${content.slice(0, max)}\n[Upstream sync truncated by Project Flow]`;
+}
+
+function shouldIncludeUpstreamSyncContext(prompt: string, task?: TaskState): boolean {
+  const text = [prompt, task?.title, task?.initialPrompt, task?.lastPrompt].filter(Boolean).join(" ").toLowerCase();
+  return /\b(upstream|sync|ecc|omo|everything claude code|oh my openagent)\b/i.test(text) ||
+    /(上游|同步|升级|更新|审查)/.test(text);
 }
 
 function summarizeReadiness(status: ReadinessStatus, blockers: string[], warnings: string[], passes: string[]): string {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.0
+
+- Added upstream sync state under `.project-flow/upstreams/`.
+- Added `sources.json`, `capabilities.json`, `sync-report.json`, and `sync-report.md`.
+- Added `/upstream:status`, `/upstream:report`, `/upstream:review`, and `/upstream:sync`.
+- Added compact upstream sync context when review work is pending.
+
 ## 0.10.0
 
 - Added project-level `workspace/overview.json` and `workspace/overview.md`.

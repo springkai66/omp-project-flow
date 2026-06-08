@@ -1,0 +1,67 @@
+name: Upstream Sync Reminder
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * 1"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  reminder:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create reminder issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "Upstream sync review";
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: "upstream-sync",
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: "upstream-sync",
+                color: "2f80ed",
+                description: "Tracks controlled ECC/OMO upstream review work",
+              });
+            }
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "upstream-sync",
+            });
+            if (issues.some(issue => issue.title === title)) {
+              core.info("An upstream sync reminder is already open.");
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ["upstream-sync"],
+              body: [
+                "Review tracked ECC/OMO changes and update Project Flow through the controlled sync process.",
+                "",
+                "Suggested local flow:",
+                "",
+                "```text",
+                "/upstream:status",
+                "/upstream:report",
+                "/upstream:review <source-id> <reference> [note]",
+                "/upstream:sync [note]",
+                "```",
+                "",
+                "See `docs/upstream-sync.md` for the full policy.",
+              ].join("\n"),
+            });

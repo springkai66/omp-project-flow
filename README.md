@@ -18,6 +18,7 @@ This plugin provides a native project workflow for agent work:
 - finish readiness gates for acceptance, plan, and verification signals
 - task snapshots for review, handoff, issues, and pull requests
 - project overview across active, paused, finished, blocked, and proposed work
+- upstream sync reports for tracking ECC/OMO-inspired capability gaps
 - workflow state
 - tool event logs
 - verification tracking
@@ -79,6 +80,7 @@ When a user prompt looks like code work, the extension automatically:
 15. refreshes project-level `workspace/overview.json` and `workspace/overview.md`
 16. blocks `/task:finish` when required finish signals are missing, unless `--force` is provided
 17. writes turn journals under `.project-flow/workspace/journals`
+18. keeps upstream sync review packs under `.project-flow/upstreams`
 
 ## Commands
 
@@ -117,9 +119,15 @@ Commands are escape hatches and diagnostics:
 /spec:show <id-prefix-or-title>
 /spec:apply <id-prefix-or-title>
 /sources:check
+/upstream:status
+/upstream:report
+/upstream:review <source-id> <reference> [note]
+/upstream:sync [note]
 ```
 
 Normal work does not require commands. The task commands are useful when you want to inspect, resume, or switch long-running work.
+
+The upstream commands are for controlled upgrades when ECC or OMO changes. They refresh the local sync report, mark reviewed upstream references, or create a normal Project Flow task to adapt useful ideas.
 
 ## Project Layout
 
@@ -129,6 +137,11 @@ Normal work does not require commands. The task commands are useful when you wan
     README.md
   spec-proposals/
     S-YYYYMMDD-slug.md
+  upstreams/
+    sources.json
+    capabilities.json
+    sync-report.json
+    sync-report.md
   workspace/
     overview.json
     overview.md
@@ -166,6 +179,10 @@ Spec proposals are saved for review under `.project-flow/spec-proposals/`. They 
 
 Spec updates are suggested, not silently applied.
 
+Upstream sync is intentionally controlled. Project Flow tracks upstream sources and capability coverage, but it does not automatically merge or execute upstream code.
+
+See [docs/upstream-sync.md](./docs/upstream-sync.md) for the review workflow.
+
 ## Development
 
 ```powershell
@@ -180,6 +197,13 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.11.0
+
+- Added upstream sync state under `.project-flow/upstreams/`.
+- Added `sources.json`, `capabilities.json`, `sync-report.json`, and `sync-report.md`.
+- Added `/upstream:status`, `/upstream:report`, `/upstream:review`, and `/upstream:sync`.
+- Hidden context now includes compact upstream sync next actions when review work is pending.
 
 ### 0.10.0
 

@@ -83,6 +83,10 @@ describe("project flow extension", () => {
       expect(fake.commands.has("spec:proposals")).toBe(true);
       expect(fake.commands.has("spec:show")).toBe(true);
       expect(fake.commands.has("spec:apply")).toBe(true);
+      expect(fake.commands.has("upstream:status")).toBe(true);
+      expect(fake.commands.has("upstream:report")).toBe(true);
+      expect(fake.commands.has("upstream:review")).toBe(true);
+      expect(fake.commands.has("upstream:sync")).toBe(true);
       expect(fake.handlers.has("before_agent_start")).toBe(true);
 
       const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0];
@@ -246,6 +250,25 @@ describe("project flow extension", () => {
       expect(fake.notifications.at(-1)?.message).toContain("Project Flow overview");
       expect(fake.notifications.at(-1)?.message).toContain("tasks: 1");
       expect(fake.notifications.at(-1)?.message).toContain("blocked tasks:");
+    });
+  });
+
+  test("shows and starts upstream sync through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      await fake.commands.get("upstream:status").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("Upstream sync");
+      expect(fake.notifications.at(-1)?.message).toContain("needs review");
+
+      await fake.commands.get("upstream:review").handler("ecc v1.2.3 checked release notes", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("Reviewed upstream source ecc");
+
+      await fake.commands.get("upstream:sync").handler("follow up on missing coverage", fake.ctx(root));
+      const active = await loadActiveTask(root);
+      expect(active?.title).toBe("Continue Project Flow upstream sync review.");
+      expect(fake.notifications.at(-1)?.message).toContain("Created upstream sync task");
     });
   });
 });

@@ -14,6 +14,9 @@ import {
   formatSnapshotSummary,
   formatSpecProposalSummary,
   formatTaskSummary,
+  formatUpstreamSyncReport,
+  formatUpstreamSyncSummary,
+  formatUpstreamTaskPrompt,
   formatVerificationSuggestions,
   getOrCreateActiveTask,
   isCodeWorkPrompt,
@@ -40,8 +43,10 @@ import {
   writeTaskReadiness,
   writeTaskResume,
   writeTaskSnapshot,
+  updateUpstreamSource,
   writeProjectOverview,
   writeTurnJournal,
+  writeUpstreamSyncReport,
   formatPlanSummary,
   formatTaskResume,
 } from "./core";
@@ -64,6 +69,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       const root = await findProjectRoot(ctx.cwd);
       const specs = await readSpecDocuments(root);
       const overview = await writeProjectOverview(root);
+      const upstream = await writeUpstreamSyncReport(root, "status");
       const taskLine = overview.activeTaskId || "none";
       ctx.ui.notify(
         [
@@ -74,6 +80,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
           `Tasks: ${overview.totals.tasks}`,
           `Readiness: ${overview.totals.readyReadiness} ready, ${overview.totals.warningReadiness} warning, ${overview.totals.blockedReadiness} blocked`,
           `Proposed specs: ${overview.totals.proposedSpecs}`,
+          `Upstream sync: ${upstream.totals.needsReview} sources need review, ${upstream.totals.missing} missing capability groups`,
         ].join("\n"),
         "info",
       );
@@ -574,6 +581,8 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
   pi.registerCommand("sources:check", {
     description: "Show upstream inspiration sources tracked by this plugin",
     handler: async (_args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const report = await writeUpstreamSyncReport(root, "sources_check");
       ctx.ui.notify(
         [
           "Project Flow source policy:",
@@ -581,9 +590,63 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
           "- OMO: task state and resume workflow inspiration",
           "- ECC: hooks, skills, and audit pack inspiration",
           "- Upstream packs are not executed automatically",
+          "",
+          formatUpstreamSyncSummary(report, 4),
         ].join("\n"),
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("upstream:status", {
+    description: "Refresh and show Project Flow upstream sync status",
+    handler: async (_args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const report = await writeUpstreamSyncReport(root, "command");
+      ctx.ui.notify(formatUpstreamSyncSummary(report), report.totals.needsReview > 0 ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("upstream:report", {
+    description: "Refresh and show the full Project Flow upstream sync report",
+    handler: async (_args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const report = await writeUpstreamSyncReport(root, "command");
+      ctx.ui.notify(trimForNotice(formatUpstreamSyncReport(report), 5000), report.totals.needsReview > 0 ? "warning" : "info");
+    },
+  });
+
+  pi.registerCommand("upstream:review", {
+    description: "Mark an upstream source reviewed: /upstream:review <source-id> <reference> [note]",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parsed = parseUpstreamReviewArgs(args);
+      if (!parsed.sourceId || !parsed.reference) {
+        ctx.ui.notify("Usage: /upstream:review <source-id> <reference> [note]", "warning");
+        return;
+      }
+      const result = await updateUpstreamSource(root, parsed.sourceId, parsed.reference, parsed.note);
+      if (result.status === "missing") {
+        ctx.ui.notify(`No upstream source matched "${parsed.sourceId}".`, "warning");
+        return;
+      }
+      ctx.ui.notify(
+        [
+          `Reviewed upstream source ${result.source?.id}: ${result.source?.reference}`,
+          formatUpstreamSyncSummary(result.report, 4),
+        ].join("\n"),
+        result.report.totals.needsReview > 0 ? "warning" : "info",
+      );
+    },
+  });
+
+  pi.registerCommand("upstream:sync", {
+    description: "Create a Project Flow task to review tracked upstream changes",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const report = await writeUpstreamSyncReport(root, "sync_task");
+      const task = await createTask(root, formatUpstreamTaskPrompt(report, args.trim() || undefined));
+      ctx.ui.notify(`Created upstream sync task ${task.id}`, "info");
     },
   });
 
@@ -788,6 +851,14 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     const force = parts.some(part => part === "--force");
     const note = parts.filter(part => part !== "--force").join(" ").trim();
     return { note: note || undefined, force };
+  }
+
+  function parseUpstreamReviewArgs(args: string): { sourceId: string; reference: string; note?: string } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const sourceId = parts.shift() || "";
+    const reference = parts.shift() || "";
+    const note = parts.join(" ").trim() || undefined;
+    return { sourceId, reference, note };
   }
 
   function formatAmbiguousTasks(tasks: Array<{ id: string; status: string; phase: string; title: string }>): string {
