@@ -68,6 +68,7 @@ describe("project flow extension", () => {
       expect(fake.commands.has("task:switch")).toBe(true);
       expect(fake.commands.has("task:handoff")).toBe(true);
       expect(fake.commands.has("task:info")).toBe(true);
+      expect(fake.commands.has("task:metadata")).toBe(true);
       expect(fake.commands.has("task:clarify")).toBe(true);
       expect(fake.commands.has("clarify:start")).toBe(true);
       expect(fake.commands.has("clarify:status")).toBe(true);
@@ -273,6 +274,20 @@ describe("project flow extension", () => {
     });
   });
 
+  test("shows task metadata through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "implement metadata command\n- 验收: metadata is visible");
+      await fake.commands.get("task:metadata").handler("", fake.ctx(root));
+
+      expect(fake.notifications.at(-1)?.message).toContain(`Metadata for ${task.id}`);
+      expect(fake.notifications.at(-1)?.message).toContain("kind: feature");
+      expect(fake.notifications.at(-1)?.message).toContain("source: user");
+    });
+  });
+
   test("runs clarification through the command surface", async () => {
     await withTempProject(async root => {
       const fake = createFakePi();
@@ -443,6 +458,9 @@ describe("project flow extension", () => {
       await fake.commands.get("upstream:sync").handler("follow up on missing coverage", fake.ctx(root));
       const active = await loadActiveTask(root);
       expect(active?.title).toBe("Continue Project Flow upstream sync review.");
+      expect(active?.metadata?.kind).toBe("upstream-sync");
+      expect(active?.metadata?.source).toBe("upstream_sync");
+      expect(active?.metadata?.labels).toContain("upstream");
       expect(fake.notifications.at(-1)?.message).toContain("Created upstream sync task");
     });
   });

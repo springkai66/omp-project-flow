@@ -19,6 +19,7 @@ import {
   formatResearchSummary,
   formatSnapshotSummary,
   formatSpecProposalSummary,
+  formatTaskMetadataSummary,
   formatTaskSummary,
   formatUpstreamSyncReport,
   formatUpstreamSyncSummary,
@@ -357,6 +358,25 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       }
       const info = await writeTaskInfo(root, task, "command");
       ctx.ui.notify(trimForNotice(info), "info");
+    },
+  });
+
+  pi.registerCommand("task:metadata", {
+    description: "Show stable metadata for a Project Flow task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await getTaskFromArgsOrActive(root, args);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      ctx.ui.notify(
+        [
+          `Metadata for ${task.id}:`,
+          task.metadata ? formatTaskMetadataSummary(task.metadata, 12) : "No metadata recorded.",
+        ].join("\n"),
+        "info",
+      );
     },
   });
 
@@ -808,7 +828,14 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const report = await writeUpstreamSyncReport(root, "sync_task");
-      const task = await createTask(root, formatUpstreamTaskPrompt(report, args.trim() || undefined));
+      const note = args.trim() || undefined;
+      const task = await createTask(root, formatUpstreamTaskPrompt(report, note), {
+        kind: "upstream-sync",
+        source: "upstream_sync",
+        labels: ["upstream"],
+        risk: report.totals.missing > 0 ? "medium" : "low",
+        origin: { note: note || "upstream sync command" },
+      });
       ctx.ui.notify(`Created upstream sync task ${task.id}`, "info");
     },
   });

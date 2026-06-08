@@ -11,6 +11,7 @@ Project Flow 是一个面向 Oh My Pi 的项目工作流、任务状态和规范
 - 持久化项目规范
 - 可审阅的规范提案
 - 任务 PRD，并自动提取目标、约束、验收条件和开放问题
+- 稳定任务 metadata：source、kind、priority、risk、labels、origin 和关系字段
 - 一问一答式 PRD 澄清流程
 - 任务 research artifacts 和 `info.md` 技术笔记
 - 结构化计划状态
@@ -67,24 +68,25 @@ omp plugin list
 
 1. 创建或恢复 active task
 2. 写入 `.project-flow/tasks/<task-id>/prd.md`
-3. 当 PRD 存在开放问题时创建 `clarification.json` 和 `clarification.md`
-4. 创建 `research/research.json`、`research/notes.md` 和 `info.md`
-5. 创建 `plan.json` 和 `plan.md`
-6. 从 `.project-flow/spec` 读取相关规范
-7. 在 agent 启动前注入隐藏的 project flow context
-8. 将工具事件记录到 `events.jsonl`
-9. 将 test/check/lint 风格命令记录到 `verification.json`
-10. 在 `verification-strategy.json` 中建议验证命令
-11. 在 `acceptance.json` 中维护验收状态
-12. 任务完成时创建可审阅的 spec proposal
-13. 刷新可恢复的 `handoff.md`
-14. 刷新 `resume.json` 和 `resume.md`
-15. 刷新 `readiness.json` 和 `readiness.md`
-16. 刷新 `snapshot.json` 和 `snapshot.md`
-17. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
-18. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
-19. 将 turn journal 写入 `.project-flow/workspace/journals`
-20. 将上游同步审查包写入 `.project-flow/upstreams`
+3. 在 `task.json` 内保存稳定任务 metadata
+4. 当 PRD 存在开放问题时创建 `clarification.json` 和 `clarification.md`
+5. 创建 `research/research.json`、`research/notes.md` 和 `info.md`
+6. 创建 `plan.json` 和 `plan.md`
+7. 从 `.project-flow/spec` 读取相关规范
+8. 在 agent 启动前注入隐藏的 project flow context
+9. 将工具事件记录到 `events.jsonl`
+10. 将 test/check/lint 风格命令记录到 `verification.json`
+11. 在 `verification-strategy.json` 中建议验证命令
+12. 在 `acceptance.json` 中维护验收状态
+13. 任务完成时创建可审阅的 spec proposal
+14. 刷新可恢复的 `handoff.md`
+15. 刷新 `resume.json` 和 `resume.md`
+16. 刷新 `readiness.json` 和 `readiness.md`
+17. 刷新 `snapshot.json` 和 `snapshot.md`
+18. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
+19. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
+20. 将 turn journal 写入 `.project-flow/workspace/journals`
+21. 将上游同步审查包写入 `.project-flow/upstreams`
 
 ## 命令
 
@@ -105,6 +107,7 @@ omp plugin list
 /task:switch <id-prefix-or-title>
 /task:handoff [id-prefix-or-title]
 /task:info [id-prefix-or-title]
+/task:metadata [id-prefix-or-title]
 /task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
@@ -190,6 +193,8 @@ omp plugin list
     active-task.json
 ```
 
+任务 metadata 存在每个 `task.json` 的 `metadata` 字段中。它只记录稳定、非派生信息，例如 `kind`、`source`、`priority`、`risk`、`labels`、`origin` 和任务关系。readiness、验证数量、触碰文件等派生状态仍由 snapshot/resume/readiness artifacts 生成。
+
 验证建议会从常见项目文件中推断，例如 `package.json`、`pyproject.toml`、`pytest.ini`、`Cargo.toml`、`go.mod`、`.sln`、`.csproj` 和 `Makefile`。
 
 Spec proposal 会保存在 `.project-flow/spec-proposals/` 下供审阅。除非显式运行 `/spec:apply`，它们不会应用到 `.project-flow/spec/`。
@@ -220,6 +225,14 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.14.0
+
+- 新增 Task Metadata v1，存储在 `task.json` 内。
+- Metadata 记录稳定任务字段：kind、source、priority、risk、labels、origin、relationships、related specs 和 custom values。
+- 新增 `/task:metadata [id-prefix-or-title]`。
+- Metadata 摘要现在会进入 task status、隐藏上下文、handoff、task info、snapshot 和 project overview。
+- 工具推断任务和 upstream sync 任务现在会记录不同的 metadata source 和 origin。
 
 ### 0.13.0
 

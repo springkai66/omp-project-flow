@@ -11,6 +11,7 @@ This plugin provides a native project workflow for agent work:
 - durable project specs
 - reviewable spec proposals
 - task PRDs with simple goal, constraint, acceptance, and open-question extraction
+- stable task metadata for source, kind, priority, risk, labels, origin, and relationships
 - one-question-at-a-time PRD clarification loops
 - task research artifacts and `info.md` technical notes
 - structured plan state
@@ -67,24 +68,25 @@ When a user prompt looks like code work, the extension automatically:
 
 1. creates or resumes an active task
 2. writes `.project-flow/tasks/<task-id>/prd.md`
-3. creates `clarification.json` and `clarification.md` when open PRD questions need a one-question loop
-4. creates `research/research.json`, `research/notes.md`, and `info.md`
-5. creates `plan.json` and `plan.md`
-6. reads relevant specs from `.project-flow/spec`
-7. injects hidden project flow context before the agent starts
-8. records tool events into `events.jsonl`
-9. records test/check/lint style commands into `verification.json`
-10. suggests verification commands in `verification-strategy.json`
-11. keeps acceptance state in `acceptance.json`
-12. creates reviewable spec proposals when tasks finish
-13. refreshes a resumable `handoff.md`
-14. refreshes `resume.json` and `resume.md`
-15. refreshes `readiness.json` and `readiness.md`
-16. refreshes `snapshot.json` and `snapshot.md`
-17. refreshes project-level `workspace/overview.json` and `workspace/overview.md`
-18. blocks `/task:finish` when required finish signals are missing, unless `--force` is provided
-19. writes turn journals under `.project-flow/workspace/journals`
-20. keeps upstream sync review packs under `.project-flow/upstreams`
+3. stores stable task metadata in `task.json`
+4. creates `clarification.json` and `clarification.md` when open PRD questions need a one-question loop
+5. creates `research/research.json`, `research/notes.md`, and `info.md`
+6. creates `plan.json` and `plan.md`
+7. reads relevant specs from `.project-flow/spec`
+8. injects hidden project flow context before the agent starts
+9. records tool events into `events.jsonl`
+10. records test/check/lint style commands into `verification.json`
+11. suggests verification commands in `verification-strategy.json`
+12. keeps acceptance state in `acceptance.json`
+13. creates reviewable spec proposals when tasks finish
+14. refreshes a resumable `handoff.md`
+15. refreshes `resume.json` and `resume.md`
+16. refreshes `readiness.json` and `readiness.md`
+17. refreshes `snapshot.json` and `snapshot.md`
+18. refreshes project-level `workspace/overview.json` and `workspace/overview.md`
+19. blocks `/task:finish` when required finish signals are missing, unless `--force` is provided
+20. writes turn journals under `.project-flow/workspace/journals`
+21. keeps upstream sync review packs under `.project-flow/upstreams`
 
 ## Commands
 
@@ -105,6 +107,7 @@ Commands are escape hatches and diagnostics:
 /task:switch <id-prefix-or-title>
 /task:handoff [id-prefix-or-title]
 /task:info [id-prefix-or-title]
+/task:metadata [id-prefix-or-title]
 /task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
@@ -190,6 +193,8 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
     active-task.json
 ```
 
+Task metadata is stored inside each `task.json` under `metadata`. It records stable, non-derived fields such as `kind`, `source`, `priority`, `risk`, `labels`, `origin`, and task relationships. Derived state such as readiness, verification counts, and touched files remains in snapshot/resume/readiness artifacts.
+
 Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`.
 
 Spec proposals are saved for review under `.project-flow/spec-proposals/`. They are not applied to `.project-flow/spec/` unless you explicitly run `/spec:apply`.
@@ -220,6 +225,14 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.14.0
+
+- Added Task Metadata v1 inside `task.json`.
+- Metadata tracks stable task fields: kind, source, priority, risk, labels, origin, relationships, related specs, and custom values.
+- Added `/task:metadata [id-prefix-or-title]`.
+- Metadata summaries now appear in task status, hidden context, handoff, task info, snapshots, and project overview.
+- Tool-inferred and upstream-sync tasks now record distinct metadata sources and origins.
 
 ### 0.13.0
 

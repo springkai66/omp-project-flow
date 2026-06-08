@@ -35,6 +35,7 @@ import {
   readSpecDocuments,
   resolveTask,
   resolveSpecProposal,
+  saveTask,
   setActiveTask,
   skipTaskClarification,
   startTaskClarification,
@@ -47,6 +48,7 @@ import {
   writeTaskResume,
   writeTaskSnapshot,
   writeUpstreamSyncReport,
+  formatTaskMetadataSummary,
 } from "../src/core";
 
 async function withTempProject<T>(fn: (root: string) => Promise<T>): Promise<T> {
@@ -72,6 +74,10 @@ describe("project flow core", () => {
       await ensureProject(root);
       const task = await createTask(root, "implement refresh token support");
       expect(task.id).toStartWith("T-");
+      expect(task.metadata?.schemaVersion).toBe(1);
+      expect(task.metadata?.kind).toBe("feature");
+      expect(task.metadata?.source).toBe("user");
+      expect(task.metadata?.priority).toBe("normal");
 
       const active = await loadActiveTask(root);
       expect(active?.id).toBe(task.id);
@@ -81,6 +87,41 @@ describe("project flow core", () => {
 
       const activeAfterFinish = await loadActiveTask(root);
       expect(activeAfterFinish).toBeUndefined();
+    });
+  });
+
+  test("normalizes task metadata for legacy task files", async () => {
+    await withTempProject(async root => {
+      const paths = await ensureProject(root);
+      const task = await createTask(root, "implement metadata compatibility for plugin docs");
+      const taskPath = path.join(paths.tasksDir, task.id, "task.json");
+      const raw = JSON.parse(await readFile(taskPath, "utf8"));
+      delete raw.metadata;
+      await writeFile(taskPath, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+
+      const loaded = await loadActiveTask(root);
+      expect(loaded?.metadata?.schemaVersion).toBe(1);
+      expect(loaded?.metadata?.kind).toBe("feature");
+      expect(loaded?.metadata?.labels).toContain("plugin");
+      expect(loaded?.metadata?.labels).toContain("docs");
+      expect(loaded?.metadata?.origin.prompt).toBe("implement metadata compatibility for plugin docs");
+      expect(formatTaskMetadataSummary(loaded!.metadata!)).toContain("source: user");
+    });
+  });
+
+  test("keeps metadata stable during ordinary task saves", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "implement stable metadata");
+      const originalMetadataUpdatedAt = task.metadata?.updatedAt;
+
+      const active = await loadActiveTask(root);
+      active!.counters.turns += 1;
+      await saveTask(root, active!);
+
+      const reloaded = await loadActiveTask(root);
+      expect(reloaded?.updatedAt).not.toBe(task.updatedAt);
+      expect(reloaded?.metadata?.updatedAt).toBe(originalMetadataUpdatedAt);
     });
   });
 
@@ -343,6 +384,7 @@ describe("project flow core", () => {
       const active = await loadActiveTask(root);
       expect(active?.phase).toBe("verifying");
       expect(active?.checkpoints.find(checkpoint => checkpoint.id === "verify")?.done).toBe(true);
+      expect(active?.metadata?.source).toBe("user");
 
       const plan = await readPlan(root, task.id);
       expect(plan.steps.find(step => step.id === "P3")?.status).toBe("done");
@@ -368,6 +410,9 @@ describe("project flow core", () => {
       expect(active?.phase).toBe("implementing");
       expect(active?.counters.toolCalls).toBe(1);
       expect(active?.checkpoints.find(checkpoint => checkpoint.id === "implement")?.done).toBe(true);
+      expect(active?.metadata?.source).toBe("tool_activity");
+      expect(active?.metadata?.origin.toolName).toBe("edit");
+      expect(active?.metadata?.labels).toContain("tool-inferred");
 
       const events = await readTaskEvents(root, active!.id);
       expect(events.some(event => event.type === "task_inferred")).toBe(true);
@@ -446,6 +491,7 @@ describe("project flow core", () => {
       const bundle = await buildContextBundle(root, "add refresh token rotation", task);
       expect(bundle.content).toContain("[PROJECT FLOW ACTIVE]");
       expect(bundle.content).toContain("Active task:");
+      expect(bundle.content).toContain("metadata:");
       expect(bundle.content).toContain("Acceptance:");
       expect(bundle.content).toContain("Plan:");
       expect(bundle.content).toContain("Next plan step:");
@@ -557,6 +603,7 @@ describe("project flow core", () => {
       const snapshot = await writeTaskSnapshot(root, task, "test");
       expect(snapshot.taskId).toBe(task.id);
       expect(snapshot.summary).toContain("Acceptance");
+      expect(snapshot.summary).toContain("Metadata");
       expect(snapshot.resume.nextAction).toBeTruthy();
       expect(snapshot.readiness.status).toBe("blocked");
       expect(snapshot.verification.checks[0]?.command).toBe("bun test tests/snapshot.test.ts");
@@ -569,6 +616,7 @@ describe("project flow core", () => {
 
       const snapshotMd = await readFile(path.join(paths.tasksDir, task.id, "snapshot.md"), "utf8");
       expect(snapshotMd).toContain("# Task Snapshot");
+      expect(snapshotMd).toContain("## Metadata");
       expect(snapshotMd).toContain("## Finish Readiness");
       expect(snapshotMd).toContain("snapshot tests pass");
     });
@@ -602,6 +650,7 @@ describe("project flow core", () => {
       const overviewMd = await readFile(path.join(paths.workspaceDir, "overview.md"), "utf8");
       expect(overviewMd).toContain("# Project Overview");
       expect(overviewMd).toContain("## Next Actions");
+      expect(overviewMd).toContain("feature/user");
       expect(overviewMd).toContain(second.id);
     });
   });

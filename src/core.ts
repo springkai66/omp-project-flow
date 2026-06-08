@@ -40,6 +40,44 @@ export interface TaskState {
     turns: number;
   };
   checkpoints: Checkpoint[];
+  metadata?: TaskMetadata;
+}
+
+export type TaskKind = "feature" | "bugfix" | "research" | "upstream-sync" | "maintenance" | "verification" | "other";
+export type TaskSource = "user" | "tool_activity" | "upstream_sync" | "manual" | "system";
+export type TaskPriority = "low" | "normal" | "high" | "urgent";
+export type TaskRisk = "low" | "medium" | "high";
+
+export interface TaskRelationships {
+  parentTaskId?: string;
+  childTaskIds: string[];
+  relatedTaskIds: string[];
+}
+
+export interface TaskOrigin {
+  prompt?: string;
+  command?: string;
+  toolName?: string;
+  toolCallId?: string;
+  note?: string;
+}
+
+export interface TaskMetadata {
+  schemaVersion: 1;
+  kind: TaskKind;
+  source: TaskSource;
+  priority: TaskPriority;
+  risk: TaskRisk;
+  labels: string[];
+  assignee?: string;
+  branch?: string;
+  prUrl?: string;
+  relationships: TaskRelationships;
+  origin: TaskOrigin;
+  relatedSpecs: string[];
+  custom: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface SpecDocument {
@@ -211,6 +249,13 @@ export interface ProjectOverviewTask {
   acceptanceTotal: number;
   verificationChecks: number;
   latestVerification?: "pass" | "fail";
+  metadata?: {
+    kind: TaskKind;
+    source: TaskSource;
+    priority: TaskPriority;
+    risk: TaskRisk;
+    labels: string[];
+  };
 }
 
 export interface ProjectOverview {
@@ -390,6 +435,18 @@ export interface TaskResolution {
   matches: TaskState[];
 }
 
+export interface CreateTaskOptions {
+  kind?: TaskKind;
+  source?: TaskSource;
+  priority?: TaskPriority;
+  risk?: TaskRisk;
+  labels?: string[];
+  origin?: TaskOrigin;
+  relationships?: Partial<TaskRelationships>;
+  relatedSpecs?: string[];
+  custom?: Record<string, unknown>;
+}
+
 const DEFAULT_CHECKPOINTS: Checkpoint[] = [
   { id: "intake", label: "Capture PRD and acceptance criteria", done: true },
   { id: "plan", label: "Build or refine implementation plan", done: false },
@@ -513,6 +570,21 @@ const DEFAULT_UPSTREAM_CAPABILITIES: UpstreamCapability[] = [
       "Add optional parentTaskId and child task indexes.",
       "Keep existing flat task commands compatible.",
       "Summarize child readiness in task snapshots and project overview.",
+    ],
+  },
+  {
+    id: "task-metadata",
+    title: "Stable task metadata for planning and orchestration",
+    upstreams: ["omo", "ecc"],
+    localStatus: "covered",
+    risk: "low",
+    localImplementation: [
+      "Project Flow stores Task Metadata v1 inside task.json.",
+      "Metadata tracks kind, source, priority, risk, labels, origin, relationships, related specs, and custom values.",
+      "Metadata summaries appear in task status, hidden context, handoff, task info, snapshots, and project overview.",
+    ],
+    nextActions: [
+      "Use metadata as the base for future session active task, subtask tree, sub-agent, and self-fix policy work.",
     ],
   },
   {
@@ -710,10 +782,176 @@ export async function loadTask(root: string, taskId: string): Promise<TaskState 
   const taskPath = path.join(getProjectPaths(root).tasksDir, taskId, "task.json");
   if (!(await pathExists(taskPath))) return undefined;
   try {
-    return JSON.parse(await readFile(taskPath, "utf8")) as TaskState;
+    return normalizeTaskState(JSON.parse(await readFile(taskPath, "utf8")) as Partial<TaskState>);
   } catch {
     return undefined;
   }
+}
+
+function normalizeTaskState(parsed: Partial<TaskState>): TaskState | undefined {
+  if (
+    typeof parsed.id !== "string" ||
+    typeof parsed.title !== "string" ||
+    !isTaskStatus(parsed.status) ||
+    !isTaskPhase(parsed.phase) ||
+    typeof parsed.createdAt !== "string" ||
+    typeof parsed.updatedAt !== "string" ||
+    typeof parsed.cwd !== "string" ||
+    typeof parsed.initialPrompt !== "string" ||
+    !parsed.counters ||
+    !Array.isArray(parsed.checkpoints)
+  ) {
+    return undefined;
+  }
+  const task: TaskState = {
+    id: parsed.id,
+    title: parsed.title,
+    status: parsed.status,
+    phase: parsed.phase,
+    createdAt: parsed.createdAt,
+    updatedAt: parsed.updatedAt,
+    cwd: parsed.cwd,
+    initialPrompt: parsed.initialPrompt,
+    lastPrompt: typeof parsed.lastPrompt === "string" ? parsed.lastPrompt : undefined,
+    counters: {
+      toolCalls: typeof parsed.counters.toolCalls === "number" ? parsed.counters.toolCalls : 0,
+      failedToolCalls: typeof parsed.counters.failedToolCalls === "number" ? parsed.counters.failedToolCalls : 0,
+      turns: typeof parsed.counters.turns === "number" ? parsed.counters.turns : 0,
+    },
+    checkpoints: parsed.checkpoints.filter(isCheckpoint),
+  };
+  task.metadata = normalizeTaskMetadata(parsed.metadata, task);
+  return task;
+}
+
+function createTaskMetadata(task: TaskState, options: CreateTaskOptions = {}): TaskMetadata {
+  const now = task.createdAt;
+  return normalizeTaskMetadata({
+    schemaVersion: 1,
+    kind: options.kind || inferTaskKind(task.initialPrompt),
+    source: options.source || "user",
+    priority: options.priority || "normal",
+    risk: options.risk || inferTaskRisk(task.initialPrompt),
+    labels: dedupeStrings(options.labels || inferTaskLabels(task.initialPrompt)),
+    relationships: normalizeTaskRelationships(options.relationships),
+    origin: normalizeTaskOrigin(options.origin || { prompt: task.initialPrompt }),
+    relatedSpecs: dedupeStrings(options.relatedSpecs || []),
+    custom: normalizeRecord(options.custom),
+    createdAt: now,
+    updatedAt: now,
+  }, task);
+}
+
+function normalizeTaskMetadata(value: unknown, task: TaskState): TaskMetadata {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const hasMetadata = !!value && typeof value === "object";
+  const createdAt = typeof record.createdAt === "string" ? record.createdAt : task.createdAt;
+  const updatedAt = typeof record.updatedAt === "string" ? record.updatedAt : task.updatedAt;
+  return {
+    schemaVersion: 1,
+    kind: isTaskKind(record.kind) ? record.kind : inferTaskKind(task.initialPrompt),
+    source: isTaskSource(record.source) ? record.source : "user",
+    priority: isTaskPriority(record.priority) ? record.priority : "normal",
+    risk: isTaskRisk(record.risk) ? record.risk : inferTaskRisk(task.initialPrompt),
+    labels: dedupeStrings(hasMetadata ? normalizeStringArray(record.labels) : inferTaskLabels(task.initialPrompt)),
+    assignee: typeof record.assignee === "string" && record.assignee.trim() ? record.assignee.trim() : undefined,
+    branch: typeof record.branch === "string" && record.branch.trim() ? record.branch.trim() : undefined,
+    prUrl: typeof record.prUrl === "string" && record.prUrl.trim() ? record.prUrl.trim() : undefined,
+    relationships: normalizeTaskRelationships(record.relationships),
+    origin: normalizeTaskOrigin(hasMetadata ? record.origin : { prompt: task.initialPrompt }),
+    relatedSpecs: dedupeStrings(normalizeStringArray(record.relatedSpecs)),
+    custom: normalizeRecord(record.custom),
+    createdAt,
+    updatedAt,
+  };
+}
+
+function normalizeTaskRelationships(value: unknown): TaskRelationships {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    parentTaskId: typeof record.parentTaskId === "string" && record.parentTaskId.trim() ? record.parentTaskId.trim() : undefined,
+    childTaskIds: dedupeStrings(normalizeStringArray(record.childTaskIds)),
+    relatedTaskIds: dedupeStrings(normalizeStringArray(record.relatedTaskIds)),
+  };
+}
+
+function normalizeTaskOrigin(value: unknown): TaskOrigin {
+  const record = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    prompt: typeof record.prompt === "string" ? record.prompt : undefined,
+    command: typeof record.command === "string" ? record.command : undefined,
+    toolName: typeof record.toolName === "string" ? record.toolName : undefined,
+    toolCallId: typeof record.toolCallId === "string" ? record.toolCallId : undefined,
+    note: typeof record.note === "string" ? record.note : undefined,
+  };
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function inferTaskKind(prompt: string): TaskKind {
+  if (/(上游|upstream|sync|ecc|omo|everything claude code|oh my openagent)/i.test(prompt)) return "upstream-sync";
+  if (/(research|调研|研究|分析|审查|review)/i.test(prompt)) return "research";
+  if (/(bug|fix|修复|排查|错误|问题|broken|failing)/i.test(prompt)) return "bugfix";
+  if (/(实现|开发|支持|add|build|implement|create)/i.test(prompt)) return "feature";
+  if (/(verify|test|check|lint|验证|测试|检查)/i.test(prompt)) return "verification";
+  if (/(清理|维护|更新文档|maintenance|docs?)/i.test(prompt)) return "maintenance";
+  return "other";
+}
+
+function inferTaskRisk(prompt: string): TaskRisk {
+  if (/(删除|移除|清空|卸载|reset|delete|remove|uninstall|migration|迁移|权限|security|auth)/i.test(prompt)) return "high";
+  if (/(配置|hook|集成|install|upgrade|sync|兼容|refactor|重构)/i.test(prompt)) return "medium";
+  return "low";
+}
+
+function inferTaskLabels(prompt: string): string[] {
+  const labels: string[] = [];
+  if (/(上游|upstream|ecc|omo)/i.test(prompt)) labels.push("upstream");
+  if (/(hook|钩子)/i.test(prompt)) labels.push("hook");
+  if (/(test|verify|check|验证|测试)/i.test(prompt)) labels.push("verification");
+  if (/(docs?|readme|文档)/i.test(prompt)) labels.push("docs");
+  if (/(plugin|插件)/i.test(prompt)) labels.push("plugin");
+  return labels;
+}
+
+function isTaskStatus(value: unknown): value is TaskStatus {
+  return value === "active" || value === "paused" || value === "finished";
+}
+
+function isTaskPhase(value: unknown): value is TaskPhase {
+  return value === "intake" || value === "planning" || value === "implementing" || value === "verifying" || value === "finished";
+}
+
+function isTaskKind(value: unknown): value is TaskKind {
+  return value === "feature" ||
+    value === "bugfix" ||
+    value === "research" ||
+    value === "upstream-sync" ||
+    value === "maintenance" ||
+    value === "verification" ||
+    value === "other";
+}
+
+function isTaskSource(value: unknown): value is TaskSource {
+  return value === "user" || value === "tool_activity" || value === "upstream_sync" || value === "manual" || value === "system";
+}
+
+function isTaskPriority(value: unknown): value is TaskPriority {
+  return value === "low" || value === "normal" || value === "high" || value === "urgent";
+}
+
+function isTaskRisk(value: unknown): value is TaskRisk {
+  return value === "low" || value === "medium" || value === "high";
+}
+
+function isCheckpoint(value: unknown): value is Checkpoint {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" &&
+    typeof record.label === "string" &&
+    typeof record.done === "boolean";
 }
 
 export async function listTasks(root: string): Promise<TaskState[]> {
@@ -788,6 +1026,7 @@ export function formatTaskSummary(
   const nextStep = plan ? nextPlanStep(plan) : undefined;
   const suggestionCount = verificationStrategy?.suggestions.length ?? 0;
   const readinessLine = readiness ? `readiness: ${readiness.status} - ${readiness.summary}` : undefined;
+  const metadataLine = task.metadata ? `metadata: ${formatTaskMetadataInline(task.metadata)}` : undefined;
   const checkpointText = task.checkpoints
     .map(checkpoint => `[${checkpoint.done ? "x" : " "}] ${checkpoint.id}`)
     .join(" ");
@@ -801,6 +1040,7 @@ export function formatTaskSummary(
     `tools: ${task.counters.toolCalls} (${task.counters.failedToolCalls} failed)`,
     `verification: ${checks.length}${lastCheck ? `, last ${lastCheck.success ? "passed" : "failed"}` : ""}`,
     `acceptance: ${doneAcceptance}/${acceptanceItems.length} done${blockedAcceptance ? `, ${blockedAcceptance} blocked` : ""}`,
+    metadataLine,
     `plan: ${nextStep ? `${nextStep.id} ${nextStep.status} - ${nextStep.text}` : "complete"}`,
     `verification suggestions: ${suggestionCount}`,
     readinessLine,
@@ -810,6 +1050,7 @@ export function formatTaskSummary(
 
 export async function saveTask(root: string, task: TaskState): Promise<void> {
   task.updatedAt = new Date().toISOString();
+  task.metadata = normalizeTaskMetadata(task.metadata, task);
   const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
   await mkdir(taskDir, { recursive: true });
   await writeFile(path.join(taskDir, "task.json"), `${JSON.stringify(task, null, 2)}\n`, "utf8");
@@ -1435,7 +1676,7 @@ export function formatUpstreamTaskPrompt(report: UpstreamSyncReport, note?: stri
   ].filter(line => line !== undefined).join("\n");
 }
 
-export async function createTask(root: string, prompt: string): Promise<TaskState> {
+export async function createTask(root: string, prompt: string, options: CreateTaskOptions = {}): Promise<TaskState> {
   const paths = await ensureProject(root);
   const previous = await loadActiveTask(root);
   if (previous && previous.status === "active") {
@@ -1469,6 +1710,7 @@ export async function createTask(root: string, prompt: string): Promise<TaskStat
     counters: { toolCalls: 0, failedToolCalls: 0, turns: 0 },
     checkpoints: DEFAULT_CHECKPOINTS.map(item => ({ ...item })),
   };
+  task.metadata = createTaskMetadata(task, options);
 
   const taskDir = path.join(paths.tasksDir, id);
   await mkdir(taskDir, { recursive: true });
@@ -1492,10 +1734,11 @@ export async function createTask(root: string, prompt: string): Promise<TaskStat
 export async function getOrCreateActiveTask(root: string, prompt: string): Promise<TaskState> {
   const active = await loadActiveTask(root);
   if (active && active.status === "active") {
+    const now = new Date().toISOString();
     active.lastPrompt = prompt;
     active.counters.turns += 1;
     await saveTask(root, active);
-    await appendTaskEvent(root, active.id, { type: "user_prompt", timestamp: new Date().toISOString(), data: { prompt } });
+    await appendTaskEvent(root, active.id, { type: "user_prompt", timestamp: now, data: { prompt } });
     await writeTaskHandoff(root, active, "user_prompt");
     return active;
   }
@@ -1554,7 +1797,16 @@ export async function recordToolEvent(
   let task = await loadActiveTask(root);
   if (!task || task.status !== "active") {
     if (kind !== "tool_end" || !shouldInferTaskFromTool(data)) return;
-    task = await createTask(root, inferTaskPromptFromTool(data));
+    task = await createTask(root, inferTaskPromptFromTool(data), {
+      source: "tool_activity",
+      kind: isVerificationToolCall(data) ? "verification" : "maintenance",
+      labels: ["tool-inferred"],
+      origin: {
+        command: extractCommand(data.args),
+        toolName: data.toolName,
+        toolCallId: data.toolCallId,
+      },
+    });
     await appendTaskEvent(root, task.id, {
       type: "task_inferred",
       timestamp: new Date().toISOString(),
@@ -2042,14 +2294,17 @@ export function formatContextBundle(
 
   if (task) {
     lines.push(
-      "",
-      "Active task:",
-      `- id: ${task.id}`,
-      `- title: ${task.title}`,
-      `- phase: ${task.phase}`,
-      `- status: ${task.status}`,
-      "- checkpoints:",
-      ...task.checkpoints.map(checkpoint => `  - [${checkpoint.done ? "x" : " "}] ${checkpoint.id}: ${checkpoint.label}`),
+      ...[
+        "",
+        "Active task:",
+        `- id: ${task.id}`,
+        `- title: ${task.title}`,
+        `- phase: ${task.phase}`,
+        `- status: ${task.status}`,
+        task.metadata ? `- metadata: ${formatTaskMetadataInline(task.metadata)}` : undefined,
+        "- checkpoints:",
+        ...task.checkpoints.map(checkpoint => `  - [${checkpoint.done ? "x" : " "}] ${checkpoint.id}: ${checkpoint.label}`),
+      ].filter((line): line is string => line !== undefined),
     );
     if (clarification) {
       lines.push("", "Clarification loop:", formatClarificationContext(clarification));
@@ -2691,6 +2946,10 @@ function formatTaskInfo(
     "",
     task.initialPrompt,
     "",
+    "## Metadata",
+    "",
+    task.metadata ? formatTaskMetadataSummary(task.metadata, 12) : "No task metadata recorded yet.",
+    "",
     "## Research",
     "",
     research ? formatResearchSummary(research, 12) : "No research artifact recorded yet.",
@@ -3051,6 +3310,7 @@ function formatTaskHandoff(
     `- Updated: ${task.updatedAt}`,
     `- Turns: ${task.counters.turns}`,
     `- Tool calls: ${task.counters.toolCalls} (${task.counters.failedToolCalls} failed)`,
+    task.metadata ? `- Metadata: ${formatTaskMetadataInline(task.metadata)}` : undefined,
     task.lastPrompt ? `- Last prompt: ${summarizeUnknown(task.lastPrompt, 260)}` : undefined,
     "",
     "## Checkpoints",
@@ -3327,6 +3587,13 @@ async function buildProjectOverview(root: string): Promise<ProjectOverview> {
       acceptanceTotal: acceptance.items.length,
       verificationChecks: verification.checks.length,
       latestVerification: lastCheck ? (lastCheck.success ? "pass" : "fail") : undefined,
+      metadata: task.metadata ? {
+        kind: task.metadata.kind,
+        source: task.metadata.source,
+        priority: task.metadata.priority,
+        risk: task.metadata.risk,
+        labels: task.metadata.labels,
+      } : undefined,
     };
     overviewTasks.push(overviewTask);
     if (task.status !== "finished" && resume.nextAction) {
@@ -3419,7 +3686,8 @@ export function formatProjectOverviewSummary(overview: ProjectOverview): string 
 
 function formatOverviewTaskLine(task: ProjectOverviewTask): string {
   const latest = task.latestVerification ? `, latest ${task.latestVerification}` : "";
-  return `- ${task.id} [${task.status}/${task.phase}, ${task.readiness}] ${task.title} - acceptance ${task.acceptanceDone}/${task.acceptanceTotal}, checks ${task.verificationChecks}${latest}`;
+  const metadata = task.metadata ? `, ${task.metadata.kind}/${task.metadata.source}/${task.metadata.priority}/${task.metadata.risk}` : "";
+  return `- ${task.id} [${task.status}/${task.phase}, ${task.readiness}${metadata}] ${task.title} - acceptance ${task.acceptanceDone}/${task.acceptanceTotal}, checks ${task.verificationChecks}${latest}`;
 }
 
 async function buildTaskSnapshot(root: string, task: TaskState, reason: string): Promise<TaskSnapshot> {
@@ -3489,6 +3757,10 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "",
     formatReadinessSummary(snapshot.readiness, 6),
     "",
+    "## Metadata",
+    "",
+    snapshot.task.metadata ? formatTaskMetadataSummary(snapshot.task.metadata, 12) : "No task metadata recorded yet.",
+    "",
     "## Clarification",
     "",
     snapshot.clarification ? formatClarificationSummary(snapshot.clarification, 12) : "No clarification artifact recorded yet.",
@@ -3543,6 +3815,7 @@ export function formatSnapshotSummary(snapshot: TaskSnapshot): string {
     `summary: ${snapshot.summary}`,
     `next action: ${snapshot.resume.nextAction}`,
     `readiness: ${snapshot.readiness.status}`,
+    snapshot.task.metadata ? `metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : undefined,
     snapshot.clarification ? `clarification: ${snapshot.clarification.status}` : undefined,
     `acceptance: ${snapshot.acceptance.items.filter(item => item.status === "done").length}/${snapshot.acceptance.items.length} done`,
     `verification: ${snapshot.verification.checks.length} check(s)`,
@@ -3556,6 +3829,7 @@ function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
     `- summary: ${snapshot.summary}`,
     `- next action: ${snapshot.resume.nextAction}`,
     `- readiness: ${snapshot.readiness.status}`,
+    snapshot.task.metadata ? `- metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : "- metadata: none",
     snapshot.clarification ? `- clarification: ${snapshot.clarification.status}, ${openClarificationQuestions(snapshot.clarification).length} open` : "- clarification: none",
     `- touched files: ${snapshot.touchedFiles.slice(0, 8).join(", ") || "none inferred"}`,
   ].join("\n");
@@ -3577,6 +3851,7 @@ function summarizeSnapshot(
     `${task.id} is ${task.status}/${task.phase}.`,
     `Acceptance ${doneAcceptance}/${acceptance.items.length} done.`,
     `Plan ${donePlan}/${plan.steps.length} done.`,
+    task.metadata ? `Metadata ${formatTaskMetadataInline(task.metadata)}.` : undefined,
     clarification ? `Clarification is ${clarification.status}.` : undefined,
     lastCheck ? `Latest verification ${lastCheck.success ? "passed" : "failed"}: ${lastCheck.command || lastCheck.toolName}.` : "No verification recorded.",
     `Finish readiness is ${readiness.status}.`,
@@ -4014,6 +4289,36 @@ function formatResumeContext(resume: ResumeState, max = 1800): string {
   ];
   const content = lines.join("\n");
   return content.length <= max ? content : `${content.slice(0, max)}\n[Resume truncated by Project Flow]`;
+}
+
+export function formatTaskMetadataInline(metadata: TaskMetadata): string {
+  const labels = metadata.labels.length > 0 ? ` labels=${metadata.labels.slice(0, 5).join(",")}` : "";
+  const relation = metadata.relationships.parentTaskId ? ` parent=${metadata.relationships.parentTaskId}` : "";
+  const owner = metadata.assignee ? ` assignee=${metadata.assignee}` : "";
+  return `${metadata.kind}/${metadata.source} priority=${metadata.priority} risk=${metadata.risk}${labels}${relation}${owner}`;
+}
+
+export function formatTaskMetadataSummary(metadata: TaskMetadata, maxLabels = 8): string {
+  return [
+    `schema: ${metadata.schemaVersion}`,
+    `kind: ${metadata.kind}`,
+    `source: ${metadata.source}`,
+    `priority: ${metadata.priority}`,
+    `risk: ${metadata.risk}`,
+    `labels: ${metadata.labels.slice(0, maxLabels).join(", ") || "none"}`,
+    metadata.assignee ? `assignee: ${metadata.assignee}` : undefined,
+    metadata.branch ? `branch: ${metadata.branch}` : undefined,
+    metadata.prUrl ? `pr: ${metadata.prUrl}` : undefined,
+    metadata.relationships.parentTaskId ? `parent: ${metadata.relationships.parentTaskId}` : undefined,
+    metadata.relationships.childTaskIds.length > 0 ? `children: ${metadata.relationships.childTaskIds.slice(0, 8).join(", ")}` : undefined,
+    metadata.relationships.relatedTaskIds.length > 0 ? `related tasks: ${metadata.relationships.relatedTaskIds.slice(0, 8).join(", ")}` : undefined,
+    metadata.relatedSpecs.length > 0 ? `related specs: ${metadata.relatedSpecs.slice(0, 8).join(", ")}` : undefined,
+    metadata.origin.toolName ? `origin tool: ${metadata.origin.toolName}` : undefined,
+    metadata.origin.command ? `origin command: ${summarizeUnknown(metadata.origin.command, 180)}` : undefined,
+    metadata.origin.note ? `origin note: ${summarizeUnknown(metadata.origin.note, 180)}` : undefined,
+    `created: ${metadata.createdAt}`,
+    `updated: ${metadata.updatedAt}`,
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function formatResearchContext(research: ResearchState, info?: string, max = 1400): string {

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.0
+
+- Added Task Metadata v1 inside `task.json`.
+- Added `/task:metadata [id-prefix-or-title]`.
+- Added metadata summaries to task status, hidden context, handoff, task info, snapshots, and project overview.
+- Tool-inferred and upstream-sync tasks now record distinct metadata sources and origins.
+
 ## 0.13.0
 
 - Added one-question-at-a-time PRD clarification artifacts: `clarification.json` and `clarification.md`.
