@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0
+
+- Added Subtask Trees v1 with parent/child task relationships.
+- Added `/task:child <prompt>` and `/task:tree [id-prefix-or-title]`.
+- Parent task readiness now rolls up unfinished child tasks.
+- Added subtask summaries to hidden context, task info, snapshots, project overview, and task tree output.
+
 ## 0.14.0
 
 - Added Task Metadata v1 inside `task.json`.

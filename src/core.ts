@@ -103,6 +103,7 @@ export interface ContextBundle {
   resume?: ResumeState;
   readiness?: ReadinessState;
   snapshot?: TaskSnapshot;
+  subtasks?: string;
   research?: ResearchState;
   info?: string;
   upstreamReport?: UpstreamSyncReport;
@@ -162,6 +163,7 @@ export interface TaskSnapshot {
   recentEvents: ResumeState["recentEvents"];
   touchedFiles: string[];
   clarification?: ClarificationState;
+  subtasks?: string;
   research?: ResearchState;
   info?: string;
   handoff?: string;
@@ -255,7 +257,22 @@ export interface ProjectOverviewTask {
     priority: TaskPriority;
     risk: TaskRisk;
     labels: string[];
+    parentTaskId?: string;
+    childTaskIds: string[];
   };
+}
+
+export interface SubtaskTreeNode {
+  task: TaskState;
+  children: SubtaskTreeNode[];
+}
+
+export interface SubtaskTree {
+  root: SubtaskTreeNode;
+  totalTasks: number;
+  openTasks: number;
+  finishedTasks: number;
+  blockedTasks: string[];
 }
 
 export interface ProjectOverview {
@@ -445,6 +462,7 @@ export interface CreateTaskOptions {
   relationships?: Partial<TaskRelationships>;
   relatedSpecs?: string[];
   custom?: Record<string, unknown>;
+  activate?: boolean;
 }
 
 const DEFAULT_CHECKPOINTS: Checkpoint[] = [
@@ -561,15 +579,15 @@ const DEFAULT_UPSTREAM_CAPABILITIES: UpstreamCapability[] = [
     id: "subtask-tree",
     title: "Parent and child task breakdown",
     upstreams: ["omo", "ecc"],
-    localStatus: "missing",
+    localStatus: "partial",
     risk: "medium",
     localImplementation: [
-      "Project Flow stores flat task records with structured plan steps.",
+      "Project Flow stores parentTaskId and childTaskIds in Task Metadata v1.",
+      "Project Flow can create child tasks and summarize child readiness in task readiness, snapshots, context, and overview.",
     ],
     nextActions: [
-      "Add optional parentTaskId and child task indexes.",
-      "Keep existing flat task commands compatible.",
-      "Summarize child readiness in task snapshots and project overview.",
+      "Add richer split templates and multi-child planning flows.",
+      "Add deeper child task rollups for large task trees.",
     ],
   },
   {
@@ -1338,13 +1356,24 @@ export async function addTaskResearchNote(
   return state;
 }
 
-export async function writeTaskInfo(root: string, task: TaskState, reason = "update"): Promise<string> {
+export async function writeTaskInfo(
+  root: string,
+  task: TaskState,
+  reason = "update",
+  options: { force?: boolean; refreshSubtasks?: boolean } = {},
+): Promise<string> {
   const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
   await mkdir(taskDir, { recursive: true });
   const infoPath = path.join(taskDir, "info.md");
   const existing = await readTaskInfo(root, task.id);
-  if (existing !== undefined) return existing;
   const currentTask = await loadTask(root, task.id) || task;
+  if (existing !== undefined && !options.force && options.refreshSubtasks) {
+    const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
+    const content = updateTaskInfoSubtasksSection(existing, subtaskSummary);
+    await writeFile(infoPath, content, "utf8");
+    return content;
+  }
+  if (existing !== undefined && !options.force) return existing;
   const [acceptance, plan, verificationStrategy, research, clarification] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readPlan(root, currentTask.id),
@@ -1352,9 +1381,20 @@ export async function writeTaskInfo(root: string, task: TaskState, reason = "upd
     readTaskResearch(root, currentTask.id),
     readTaskClarification(root, currentTask.id),
   ]);
-  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, reason);
+  const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
+  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, reason);
   await writeFile(infoPath, content, "utf8");
   return content;
+}
+
+function updateTaskInfoSubtasksSection(content: string, subtaskSummary: string): string {
+  const section = `## Subtasks\n\n${subtaskSummary}\n`;
+  const sectionPattern = /(^## Subtasks\r?\n\r?\n)([\s\S]*?)(?=\r?\n## |\s*$)/m;
+  if (sectionPattern.test(content)) {
+    return content.replace(sectionPattern, `$1${subtaskSummary}\n`);
+  }
+  const trimmedEnd = content.endsWith("\n") ? content : `${content}\n`;
+  return `${trimmedEnd}\n${section}`;
 }
 
 export async function readTaskResume(root: string, taskId: string): Promise<ResumeState | undefined> {
@@ -1678,7 +1718,8 @@ export function formatUpstreamTaskPrompt(report: UpstreamSyncReport, note?: stri
 
 export async function createTask(root: string, prompt: string, options: CreateTaskOptions = {}): Promise<TaskState> {
   const paths = await ensureProject(root);
-  const previous = await loadActiveTask(root);
+  const activate = options.activate !== false;
+  const previous = activate ? await loadActiveTask(root) : undefined;
   if (previous && previous.status === "active") {
     previous.status = "paused";
     await saveTask(root, previous);
@@ -1700,7 +1741,7 @@ export async function createTask(root: string, prompt: string, options: CreateTa
   const task: TaskState = {
     id,
     title,
-    status: "active",
+    status: activate ? "active" : "paused",
     phase: "intake",
     createdAt: now,
     updatedAt: now,
@@ -1725,7 +1766,9 @@ export async function createTask(root: string, prompt: string, options: CreateTa
   await refreshVerificationStrategy(root, id);
   await writeInitialTaskResearch(root, task, prd, now);
   await writeClarificationFiles(root, task, clarification);
-  await writeFile(paths.activeTaskPath, `${JSON.stringify({ id, updatedAt: now }, null, 2)}\n`, "utf8");
+  if (activate) {
+    await writeFile(paths.activeTaskPath, `${JSON.stringify({ id, updatedAt: now }, null, 2)}\n`, "utf8");
+  }
   await appendTaskEvent(root, id, { type: "task_created", timestamp: now, data: { prompt } });
   await writeTaskHandoff(root, task, "created");
   return task;
@@ -1743,6 +1786,160 @@ export async function getOrCreateActiveTask(root: string, prompt: string): Promi
     return active;
   }
   return createTask(root, prompt);
+}
+
+export async function createChildTask(root: string, parentTaskId: string, prompt: string): Promise<TaskState | undefined> {
+  const parent = await loadTask(root, parentTaskId);
+  if (!parent) return undefined;
+  const child = await createTask(root, prompt, {
+    activate: false,
+    source: "manual",
+    kind: inferTaskKind(prompt),
+    labels: dedupeStrings([...(parent.metadata?.labels || []), "subtask"]),
+    risk: parent.metadata?.risk || inferTaskRisk(prompt),
+    relationships: { parentTaskId: parent.id },
+    origin: { prompt, note: `child of ${parent.id}` },
+  });
+  const linked = await linkParentChildTask(root, parent.id, child.id);
+  if (!linked) return undefined;
+  const updatedParent = await loadTask(root, parent.id) || parent;
+  await writeTaskInfo(root, updatedParent, "child_created", { refreshSubtasks: true });
+  await writeTaskHandoff(root, updatedParent, "child_created");
+  await appendTaskEvent(root, parent.id, {
+    type: "child_task_created",
+    timestamp: new Date().toISOString(),
+    data: { childTaskId: child.id },
+  });
+  await appendTaskEvent(root, child.id, {
+    type: "task_parent_linked",
+    timestamp: new Date().toISOString(),
+    data: { parentTaskId: parent.id },
+  });
+  return (await loadTask(root, child.id)) || child;
+}
+
+export async function linkParentChildTask(root: string, parentTaskId: string, childTaskId: string): Promise<boolean> {
+  if (parentTaskId === childTaskId) return false;
+  const [parent, child] = await Promise.all([
+    loadTask(root, parentTaskId),
+    loadTask(root, childTaskId),
+  ]);
+  if (!parent || !child) return false;
+  if (await wouldCreateTaskCycle(root, parent.id, child.id)) return false;
+
+  parent.metadata = normalizeTaskMetadata(parent.metadata, parent);
+  child.metadata = normalizeTaskMetadata(child.metadata, child);
+  const previousParentId = child.metadata.relationships.parentTaskId;
+  const previousParent = previousParentId && previousParentId !== parent.id ? await loadTask(root, previousParentId) : undefined;
+  parent.metadata.relationships.childTaskIds = dedupeStrings([...parent.metadata.relationships.childTaskIds, child.id]);
+  child.metadata.relationships.parentTaskId = parent.id;
+  parent.metadata.updatedAt = new Date().toISOString();
+  child.metadata.updatedAt = parent.metadata.updatedAt;
+  if (previousParent) {
+    previousParent.metadata = normalizeTaskMetadata(previousParent.metadata, previousParent);
+    previousParent.metadata.relationships.childTaskIds = previousParent.metadata.relationships.childTaskIds.filter(id => id !== child.id);
+    previousParent.metadata.updatedAt = parent.metadata.updatedAt;
+    await saveTask(root, previousParent);
+    await writeTaskInfo(root, previousParent, "child_reparented", { refreshSubtasks: true });
+  }
+  await saveTask(root, parent);
+  await saveTask(root, child);
+  await writeTaskInfo(root, parent, "child_linked", { refreshSubtasks: true });
+  await writeTaskInfo(root, child, "parent_linked", { refreshSubtasks: true });
+  return true;
+}
+
+async function wouldCreateTaskCycle(root: string, parentTaskId: string, childTaskId: string): Promise<boolean> {
+  let current: TaskState | undefined = await loadTask(root, parentTaskId);
+  const seen = new Set<string>([childTaskId]);
+  while (current?.metadata?.relationships.parentTaskId) {
+    const nextId = current.metadata.relationships.parentTaskId;
+    if (seen.has(nextId)) return true;
+    seen.add(nextId);
+    current = await loadTask(root, nextId);
+  }
+  return false;
+}
+
+export async function buildSubtaskTree(root: string, taskId: string, maxDepth = 4): Promise<SubtaskTree | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const rootNode = await buildSubtaskTreeNode(root, task, new Set(), maxDepth);
+  const nodes = flattenSubtaskTree(rootNode);
+  const blockedTasks: string[] = [];
+  for (const node of nodes) {
+    if (node.task.id === task.id) continue;
+    const readiness = await writeTaskReadiness(root, node.task, "subtask_tree");
+    if (readiness.status === "blocked") blockedTasks.push(`${node.task.id}: ${readiness.summary}`);
+  }
+  return {
+    root: rootNode,
+    totalTasks: nodes.length,
+    openTasks: nodes.filter(node => node.task.status !== "finished").length,
+    finishedTasks: nodes.filter(node => node.task.status === "finished").length,
+    blockedTasks,
+  };
+}
+
+async function buildSubtaskTreeNode(
+  root: string,
+  task: TaskState,
+  seen: Set<string>,
+  depth: number,
+): Promise<SubtaskTreeNode> {
+  if (seen.has(task.id) || depth <= 0) return { task, children: [] };
+  seen.add(task.id);
+  const childIds = task.metadata?.relationships.childTaskIds || [];
+  const children: SubtaskTreeNode[] = [];
+  for (const childId of childIds.slice(0, 20)) {
+    const child = await loadTask(root, childId);
+    if (!child) continue;
+    children.push(await buildSubtaskTreeNode(root, child, new Set(seen), depth - 1));
+  }
+  return { task, children };
+}
+
+function flattenSubtaskTree(node: SubtaskTreeNode): SubtaskTreeNode[] {
+  return [node, ...node.children.flatMap(flattenSubtaskTree)];
+}
+
+export function formatSubtaskTree(tree: SubtaskTree, maxDepth = 4): string {
+  return [
+    "# Subtask Tree",
+    "",
+    `Root: ${tree.root.task.id}`,
+    `Total tasks: ${tree.totalTasks}`,
+    `Open tasks: ${tree.openTasks}`,
+    `Finished tasks: ${tree.finishedTasks}`,
+    "",
+    "## Tree",
+    "",
+    formatSubtaskTreeNode(tree.root, 0, maxDepth),
+    "",
+    "## Blocked Subtasks",
+    "",
+    formatResumeList(tree.blockedTasks.slice(0, 12), "No blocked subtasks recorded."),
+    "",
+  ].join("\n");
+}
+
+function formatSubtaskTreeNode(node: SubtaskTreeNode, depth: number, maxDepth: number): string {
+  const indent = "  ".repeat(depth);
+  const line = `${indent}- ${node.task.id} [${node.task.status}/${node.task.phase}] ${node.task.title}`;
+  if (depth >= maxDepth || node.children.length === 0) return line;
+  return [line, ...node.children.map(child => formatSubtaskTreeNode(child, depth + 1, maxDepth))].join("\n");
+}
+
+export async function formatSubtaskTreeSummary(root: string, task: TaskState, max = 8): Promise<string> {
+  const tree = await buildSubtaskTree(root, task.id, 3);
+  if (!tree || tree.totalTasks <= 1) return "No subtasks recorded.";
+  const nodes = flattenSubtaskTree(tree.root).filter(node => node.task.id !== task.id);
+  return [
+    `subtasks: ${nodes.length}`,
+    `open: ${tree.openTasks - (tree.root.task.status !== "finished" ? 1 : 0)}`,
+    `finished: ${tree.finishedTasks - (tree.root.task.status === "finished" ? 1 : 0)}`,
+    nodes.length > 0 ? ["recent subtasks:", ...nodes.slice(0, max).map(node => `- ${node.task.id} [${node.task.status}/${node.task.phase}] ${node.task.title}`)].join("\n") : "recent subtasks: none",
+  ].join("\n");
 }
 
 export async function finishActiveTask(root: string, note?: string, options: { force?: boolean } = {}): Promise<TaskState | undefined> {
@@ -1773,6 +1970,17 @@ export async function finishActiveTask(root: string, note?: string, options: { f
   await writeJournal(root, task, "finish", note);
   await writeTaskHandoff(root, task, "finish");
   await writeTaskReadiness(root, task, "finish");
+  const parentId = task.metadata?.relationships.parentTaskId;
+  const parent = parentId ? await loadTask(root, parentId) : undefined;
+  if (parent) {
+    await appendTaskEvent(root, parent.id, {
+      type: "child_task_finished",
+      timestamp: new Date().toISOString(),
+      data: { childTaskId: task.id },
+    });
+    await writeTaskInfo(root, parent, "child_finished", { refreshSubtasks: true });
+    await writeTaskHandoff(root, parent, "child_finished");
+  }
   await rm(paths.activeTaskPath, { force: true });
   return task;
 }
@@ -2265,9 +2473,10 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const clarification = snapshot?.clarification;
   const research = snapshot?.research;
   const info = snapshot?.info;
+  const subtaskSummary = task ? await formatSubtaskTreeSummary(root, task, 8) : undefined;
   const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, research, info, upstreamReport);
-  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, research, info, upstreamReport, content };
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, subtaskSummary, research, info, upstreamReport);
+  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, research, info, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -2282,6 +2491,7 @@ export function formatContextBundle(
   readiness?: ReadinessState,
   snapshot?: TaskSnapshot,
   clarification?: ClarificationState,
+  subtasks?: string,
   research?: ResearchState,
   info?: string,
   upstreamReport?: UpstreamSyncReport,
@@ -2308,6 +2518,9 @@ export function formatContextBundle(
     );
     if (clarification) {
       lines.push("", "Clarification loop:", formatClarificationContext(clarification));
+    }
+    if (subtasks && subtasks !== "No subtasks recorded.") {
+      lines.push("", "Subtasks:", subtasks);
     }
     if (acceptance) {
       lines.push("", "Acceptance:", formatAcceptanceSummary(acceptance, 6));
@@ -2930,6 +3143,7 @@ function formatTaskInfo(
   strategy: VerificationStrategy,
   research: ResearchState | undefined,
   clarification: ClarificationState | undefined,
+  subtaskSummary: string,
   reason: string,
 ): string {
   return [
@@ -2949,6 +3163,10 @@ function formatTaskInfo(
     "## Metadata",
     "",
     task.metadata ? formatTaskMetadataSummary(task.metadata, 12) : "No task metadata recorded yet.",
+    "",
+    "## Subtasks",
+    "",
+    subtaskSummary,
     "",
     "## Research",
     "",
@@ -3593,6 +3811,8 @@ async function buildProjectOverview(root: string): Promise<ProjectOverview> {
         priority: task.metadata.priority,
         risk: task.metadata.risk,
         labels: task.metadata.labels,
+        parentTaskId: task.metadata.relationships.parentTaskId,
+        childTaskIds: task.metadata.relationships.childTaskIds,
       } : undefined,
     };
     overviewTasks.push(overviewTask);
@@ -3686,7 +3906,9 @@ export function formatProjectOverviewSummary(overview: ProjectOverview): string 
 
 function formatOverviewTaskLine(task: ProjectOverviewTask): string {
   const latest = task.latestVerification ? `, latest ${task.latestVerification}` : "";
-  const metadata = task.metadata ? `, ${task.metadata.kind}/${task.metadata.source}/${task.metadata.priority}/${task.metadata.risk}` : "";
+  const childInfo = task.metadata?.childTaskIds.length ? `, children ${task.metadata.childTaskIds.length}` : "";
+  const parentInfo = task.metadata?.parentTaskId ? `, parent ${task.metadata.parentTaskId}` : "";
+  const metadata = task.metadata ? `, ${task.metadata.kind}/${task.metadata.source}/${task.metadata.priority}/${task.metadata.risk}${childInfo}${parentInfo}` : "";
   return `- ${task.id} [${task.status}/${task.phase}, ${task.readiness}${metadata}] ${task.title} - acceptance ${task.acceptanceDone}/${task.acceptanceTotal}, checks ${task.verificationChecks}${latest}`;
 }
 
@@ -3705,6 +3927,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
   const resume = await writeTaskResume(root, currentTask, reason);
   const readiness = await writeTaskReadiness(root, currentTask, reason);
   const info = await writeTaskInfo(root, currentTask, reason);
+  const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
   const recentEvents = events.slice(-20).map(event => ({
     type: event.type,
     timestamp: event.timestamp,
@@ -3728,6 +3951,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     recentEvents,
     touchedFiles: resume.touchedFiles,
     clarification,
+    subtasks: subtaskSummary,
     research,
     info,
     handoff,
@@ -3760,6 +3984,10 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "## Metadata",
     "",
     snapshot.task.metadata ? formatTaskMetadataSummary(snapshot.task.metadata, 12) : "No task metadata recorded yet.",
+    "",
+    "## Subtasks",
+    "",
+    snapshot.subtasks || "No subtasks recorded.",
     "",
     "## Clarification",
     "",
@@ -3816,6 +4044,7 @@ export function formatSnapshotSummary(snapshot: TaskSnapshot): string {
     `next action: ${snapshot.resume.nextAction}`,
     `readiness: ${snapshot.readiness.status}`,
     snapshot.task.metadata ? `metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : undefined,
+    snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `subtasks: ${snapshot.subtasks.split(/\r?\n/)[0]}` : undefined,
     snapshot.clarification ? `clarification: ${snapshot.clarification.status}` : undefined,
     `acceptance: ${snapshot.acceptance.items.filter(item => item.status === "done").length}/${snapshot.acceptance.items.length} done`,
     `verification: ${snapshot.verification.checks.length} check(s)`,
@@ -3830,6 +4059,7 @@ function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
     `- next action: ${snapshot.resume.nextAction}`,
     `- readiness: ${snapshot.readiness.status}`,
     snapshot.task.metadata ? `- metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : "- metadata: none",
+    snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `- subtasks: ${snapshot.subtasks.replace(/\r?\n/g, "; ")}` : "- subtasks: none",
     snapshot.clarification ? `- clarification: ${snapshot.clarification.status}, ${openClarificationQuestions(snapshot.clarification).length} open` : "- clarification: none",
     `- touched files: ${snapshot.touchedFiles.slice(0, 8).join(", ") || "none inferred"}`,
   ].join("\n");
@@ -3936,6 +4166,20 @@ async function buildReadinessState(root: string, task: TaskState, reason: string
 
   if (currentTask.counters.failedToolCalls > 0) {
     warnings.push(`${currentTask.counters.failedToolCalls} failed tool call(s) were recorded.`);
+  }
+
+  const childTaskIds = currentTask.metadata?.relationships.childTaskIds || [];
+  if (childTaskIds.length > 0) {
+    const childTasks = (await Promise.all(childTaskIds.map(childId => loadTask(root, childId)))).filter(isDefined);
+    const unfinishedChildren = childTasks.filter(child => child.status !== "finished");
+    const finishedChildren = childTasks.filter(child => child.status === "finished");
+    if (unfinishedChildren.length > 0) {
+      blockers.push(`${unfinishedChildren.length} child task(s) are not finished.`);
+      nextActions.push(...unfinishedChildren.slice(0, 4).map(child => `Finish child ${child.id}: ${child.title}`));
+    }
+    if (finishedChildren.length > 0 && unfinishedChildren.length === 0) {
+      passes.push(`Child tasks complete: ${finishedChildren.length}/${childTasks.length}.`);
+    }
   }
 
   const uniqueNextActions = dedupeStrings(nextActions).slice(0, 10);

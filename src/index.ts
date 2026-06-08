@@ -5,8 +5,10 @@ import {
   addTaskResearchNote,
   answerTaskClarification,
   applySpecProposal,
+  buildSubtaskTree,
   buildContextBundle,
   createSpecProposal,
+  createChildTask,
   createTask,
   ensureProject,
   findProjectRoot,
@@ -19,6 +21,7 @@ import {
   formatResearchSummary,
   formatSnapshotSummary,
   formatSpecProposalSummary,
+  formatSubtaskTree,
   formatTaskMetadataSummary,
   formatTaskSummary,
   formatUpstreamSyncReport,
@@ -377,6 +380,47 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         ].join("\n"),
         "info",
       );
+    },
+  });
+
+  pi.registerCommand("task:child", {
+    description: "Create a child task under the active Project Flow task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parent = await loadActiveTask(root);
+      if (!parent) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const prompt = args.trim();
+      if (!prompt) {
+        ctx.ui.notify("Provide a child task prompt.", "warning");
+        return;
+      }
+      const child = await createChildTask(root, parent.id, prompt);
+      if (!child) {
+        ctx.ui.notify(`Could not create child task for ${parent.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(`Created child task ${child.id} under ${parent.id}`, "info");
+    },
+  });
+
+  pi.registerCommand("task:tree", {
+    description: "Show a Project Flow parent/child task tree",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await getTaskFromArgsOrActive(root, args);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const tree = await buildSubtaskTree(root, task.id);
+      if (!tree) {
+        ctx.ui.notify(`Could not build task tree for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(trimForNotice(formatSubtaskTree(tree), 5000), tree.blockedTasks.length > 0 ? "warning" : "info");
     },
   });
 

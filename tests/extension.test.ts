@@ -69,6 +69,8 @@ describe("project flow extension", () => {
       expect(fake.commands.has("task:handoff")).toBe(true);
       expect(fake.commands.has("task:info")).toBe(true);
       expect(fake.commands.has("task:metadata")).toBe(true);
+      expect(fake.commands.has("task:child")).toBe(true);
+      expect(fake.commands.has("task:tree")).toBe(true);
       expect(fake.commands.has("task:clarify")).toBe(true);
       expect(fake.commands.has("clarify:start")).toBe(true);
       expect(fake.commands.has("clarify:status")).toBe(true);
@@ -285,6 +287,25 @@ describe("project flow extension", () => {
       expect(fake.notifications.at(-1)?.message).toContain(`Metadata for ${task.id}`);
       expect(fake.notifications.at(-1)?.message).toContain("kind: feature");
       expect(fake.notifications.at(-1)?.message).toContain("source: user");
+    });
+  });
+
+  test("creates and shows child tasks through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const parent = await createTask(root, "implement parent command\n- 验收: children are visible");
+      await fake.commands.get("task:child").handler("implement child command\n- 验收: child exists", fake.ctx(root));
+
+      const active = await loadActiveTask(root);
+      expect(active?.id).toBe(parent.id);
+      expect(active?.metadata?.relationships.childTaskIds).toHaveLength(1);
+      expect(fake.notifications.at(-1)?.message).toContain("Created child task");
+
+      await fake.commands.get("task:tree").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("# Subtask Tree");
+      expect(fake.notifications.at(-1)?.message).toContain(active?.metadata?.relationships.childTaskIds[0] || "");
     });
   });
 

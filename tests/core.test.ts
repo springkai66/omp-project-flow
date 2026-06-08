@@ -7,15 +7,19 @@ import {
   addTaskResearchNote,
   answerTaskClarification,
   applySpecProposal,
+  buildSubtaskTree,
   createSpecProposal,
+  createChildTask,
   createTask,
   ensureProject,
   finishActiveTask,
   getProjectPaths,
   isCodeWorkPrompt,
+  linkParentChildTask,
   listTasks,
   listSpecProposals,
   loadActiveTask,
+  loadTask,
   readProjectOverview,
   readPlan,
   readAcceptance,
@@ -49,6 +53,7 @@ import {
   writeTaskSnapshot,
   writeUpstreamSyncReport,
   formatTaskMetadataSummary,
+  formatSubtaskTree,
 } from "../src/core";
 
 async function withTempProject<T>(fn: (root: string) => Promise<T>): Promise<T> {
@@ -145,6 +150,57 @@ describe("project flow core", () => {
 
       const activeAfterSwitch = await loadActiveTask(root);
       expect(activeAfterSwitch?.id).toBe(first.id);
+    });
+  });
+
+  test("creates child tasks and summarizes a subtask tree", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const parent = await createTask(root, "implement parent workflow\n- 验收: children are tracked");
+      const child = await createChildTask(root, parent.id, "implement child workflow\n- 验收: child is done");
+      expect(child?.metadata?.relationships.parentTaskId).toBe(parent.id);
+      expect(child?.status).toBe("paused");
+
+      const reloadedParent = await loadTask(root, parent.id);
+      expect(reloadedParent?.metadata?.relationships.childTaskIds).toContain(child!.id);
+      expect((await loadActiveTask(root))?.id).toBe(parent.id);
+      const parentInfo = await readTaskInfo(root, parent.id);
+      expect(parentInfo).toContain("## Subtasks");
+      expect(parentInfo).toContain(child!.id);
+      const overview = await readProjectOverview(root);
+      expect(overview?.totals.active).toBe(1);
+      expect(overview?.totals.paused).toBe(1);
+
+      const tree = await buildSubtaskTree(root, parent.id);
+      expect(tree?.totalTasks).toBe(2);
+      expect(formatSubtaskTree(tree!)).toContain(child!.id);
+      expect(await linkParentChildTask(root, parent.id, parent.id)).toBe(false);
+      expect(await linkParentChildTask(root, child!.id, parent.id)).toBe(false);
+      const readinessBeforeMove = await writeTaskReadiness(root, parent, "test");
+      expect(readinessBeforeMove.status).toBe("blocked");
+      expect(readinessBeforeMove.blockers.join("\n")).toContain("child task");
+
+      const nextParent = await createTask(root, "implement next parent workflow\n- 验收: child can move");
+      expect(await linkParentChildTask(root, nextParent.id, child!.id)).toBe(true);
+      const oldParentAfterMove = await loadTask(root, parent.id);
+      const nextParentAfterMove = await loadTask(root, nextParent.id);
+      expect(oldParentAfterMove?.metadata?.relationships.childTaskIds).not.toContain(child!.id);
+      expect(nextParentAfterMove?.metadata?.relationships.childTaskIds).toContain(child!.id);
+
+      const readiness = await writeTaskReadiness(root, parent, "test");
+      expect(readiness.blockers.join("\n")).not.toContain("child task");
+
+      const snapshot = await writeTaskSnapshot(root, nextParent, "test");
+      expect(snapshot.subtasks).toContain("subtasks: 1");
+      const bundle = await buildContextBundle(root, "continue parent workflow", nextParent);
+      expect(bundle.content).toContain("Subtasks:");
+      expect(bundle.content).toContain(child!.id);
+
+      await setActiveTask(root, child!.id);
+      const finishedChild = await finishActiveTask(root, "child complete", { force: true });
+      expect(finishedChild?.status).toBe("finished");
+      const nextParentInfo = await readTaskInfo(root, nextParent.id);
+      expect(nextParentInfo).toContain(`${child!.id} [finished/finished]`);
     });
   });
 

@@ -12,6 +12,7 @@ Project Flow 是一个面向 Oh My Pi 的项目工作流、任务状态和规范
 - 可审阅的规范提案
 - 任务 PRD，并自动提取目标、约束、验收条件和开放问题
 - 稳定任务 metadata：source、kind、priority、risk、labels、origin 和关系字段
+- 父子 subtask tree，并汇总子任务 readiness
 - 一问一答式 PRD 澄清流程
 - 任务 research artifacts 和 `info.md` 技术笔记
 - 结构化计划状态
@@ -69,24 +70,25 @@ omp plugin list
 1. 创建或恢复 active task
 2. 写入 `.project-flow/tasks/<task-id>/prd.md`
 3. 在 `task.json` 内保存稳定任务 metadata
-4. 当 PRD 存在开放问题时创建 `clarification.json` 和 `clarification.md`
-5. 创建 `research/research.json`、`research/notes.md` 和 `info.md`
-6. 创建 `plan.json` 和 `plan.md`
-7. 从 `.project-flow/spec` 读取相关规范
-8. 在 agent 启动前注入隐藏的 project flow context
-9. 将工具事件记录到 `events.jsonl`
-10. 将 test/check/lint 风格命令记录到 `verification.json`
-11. 在 `verification-strategy.json` 中建议验证命令
-12. 在 `acceptance.json` 中维护验收状态
-13. 任务完成时创建可审阅的 spec proposal
-14. 刷新可恢复的 `handoff.md`
-15. 刷新 `resume.json` 和 `resume.md`
-16. 刷新 `readiness.json` 和 `readiness.md`
-17. 刷新 `snapshot.json` 和 `snapshot.md`
-18. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
-19. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
-20. 将 turn journal 写入 `.project-flow/workspace/journals`
-21. 将上游同步审查包写入 `.project-flow/upstreams`
+4. 在 metadata 中追踪父子任务关系
+5. 当 PRD 存在开放问题时创建 `clarification.json` 和 `clarification.md`
+6. 创建 `research/research.json`、`research/notes.md` 和 `info.md`
+7. 创建 `plan.json` 和 `plan.md`
+8. 从 `.project-flow/spec` 读取相关规范
+9. 在 agent 启动前注入隐藏的 project flow context
+10. 将工具事件记录到 `events.jsonl`
+11. 将 test/check/lint 风格命令记录到 `verification.json`
+12. 在 `verification-strategy.json` 中建议验证命令
+13. 在 `acceptance.json` 中维护验收状态
+14. 任务完成时创建可审阅的 spec proposal
+15. 刷新可恢复的 `handoff.md`
+16. 刷新 `resume.json` 和 `resume.md`
+17. 刷新 `readiness.json` 和 `readiness.md`
+18. 刷新 `snapshot.json` 和 `snapshot.md`
+19. 刷新项目级 `workspace/overview.json` 和 `workspace/overview.md`
+20. 当关键完成信号缺失时阻止 `/task:finish`，除非提供 `--force`
+21. 将 turn journal 写入 `.project-flow/workspace/journals`
+22. 将上游同步审查包写入 `.project-flow/upstreams`
 
 ## 命令
 
@@ -108,6 +110,8 @@ omp plugin list
 /task:handoff [id-prefix-or-title]
 /task:info [id-prefix-or-title]
 /task:metadata [id-prefix-or-title]
+/task:child <prompt>
+/task:tree [id-prefix-or-title]
 /task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
@@ -195,6 +199,8 @@ omp plugin list
 
 任务 metadata 存在每个 `task.json` 的 `metadata` 字段中。它只记录稳定、非派生信息，例如 `kind`、`source`、`priority`、`risk`、`labels`、`origin` 和任务关系。readiness、验证数量、触碰文件等派生状态仍由 snapshot/resume/readiness artifacts 生成。
 
+Subtask 是通过 `metadata.relationships.parentTaskId` 和 `childTaskIds` 关联的普通任务。使用 `/task:child <prompt>` 在当前 active task 下创建子任务，使用 `/task:tree` 查看任务树。当子任务尚未完成时，父任务 readiness 会阻止收尾；仍可用 `/task:finish --force` 覆盖。
+
 验证建议会从常见项目文件中推断，例如 `package.json`、`pyproject.toml`、`pytest.ini`、`Cargo.toml`、`go.mod`、`.sln`、`.csproj` 和 `Makefile`。
 
 Spec proposal 会保存在 `.project-flow/spec-proposals/` 下供审阅。除非显式运行 `/spec:apply`，它们不会应用到 `.project-flow/spec/`。
@@ -225,6 +231,13 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.15.0
+
+- 新增 Subtask Trees v1：父子任务关系。
+- 新增 `/task:child <prompt>` 和 `/task:tree [id-prefix-or-title]`。
+- 父任务 readiness 现在会汇总未完成子任务。
+- 子任务摘要现在会进入隐藏上下文、task info、snapshot、project overview 和 task tree 输出。
 
 ### 0.14.0
 
