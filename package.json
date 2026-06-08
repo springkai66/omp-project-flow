@@ -1,0 +1,55 @@
+{
+  "name": "omp-project-flow",
+  "version": "0.10.0",
+  "description": "Project Flow workspace, task workflow, and spec injection for Oh My Pi.",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "bun test",
+    "check": "bun --check src/index.ts && bun --check src/core.ts"
+  },
+  "keywords": [
+    "oh-my-pi",
+    "omp",
+    "project-flow",
+    "coding-agent"
+  ],
+  "author": "springkai66",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/springkai66/omp-project-flow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/springkai66/omp-project-flow/issues"
+  },
+  "homepage": "https://github.com/springkai66/omp-project-flow#readme",
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": ">=15.10.0"
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": ">=15.10.0",
+    "@types/bun": "^1.3.14"
+  },
+  "omp": {
+    "name": "Project Flow",
+    "version": "0.10.0",
+    "description": "Automatic spec/task/workspace flow for Oh My Pi.",
+    "extensions": [
+      "src/index.ts"
+    ],
+    "settings": {
+      "autoCreateTasks": {
+        "type": "boolean",
+        "description": "Automatically create a project task when a user prompt looks like code work.",
+        "default": true
+      },
+      "writeProjectJournal": {
+        "type": "boolean",
+        "description": "Write journal entries under .project-flow/workspace/journals.",
+        "default": true
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+node_modules/
+.omp/
+.project-flow/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+coverage/
