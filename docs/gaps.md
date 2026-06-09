@@ -49,10 +49,10 @@ It also records implemented areas that are useful but still below the depth of T
   - Target behavior: add stronger spec completeness checks, plan review criteria, explicit non-goals, decision logs, and promotion gates before implementation.
 
 - Research artifacts and `info.md`
-  - Status: implemented, below ECC/Trellis depth.
-  - Current behavior: each task can store `research/research.json`, `research/source-packs.json`, `research/notes.md`, and `info.md`; source packs record reviewed source, source kind, claim, excerpt, confidence, related item ids, and open risks; summaries flow into context, handoff, snapshots, and spec proposals.
-  - Gap: there is still no autonomous research agent or source extraction pipeline; source packs are explicitly added by the agent/user after reviewing repo or upstream artifacts.
-  - Target behavior: add optional research-agent handoff, richer source extraction, and confidence/risk review workflows while keeping review-first state ownership.
+  - Status: complete-local in 0.25.0; external-blocked only for autonomous research-agent launch.
+  - Current behavior: each task can store `research/research.json`, `research/source-packs.json`, `research/notes.md`, `research/handoff.md`, and `info.md`; research records structured questions, findings, decisions, risks, reviewed/draft source packs, local file/range extraction, source confidence, freshness, and implementation/check handoff packets; summaries flow into context, handoff, snapshots, and spec proposals.
+  - Boundary: Project Flow intentionally does not claim autonomous research or silently fetch/diff remote upstream sources; reviewed evidence is explicit and local/agent/user controlled.
+  - Target behavior: add autonomous research-agent execution only if the runtime exposes a safe, auditable agent/session contract; keep review-first state ownership as the fallback.
 
 - Handoff / resume / snapshot artifacts
   - Status: implemented, below OMO/Superpowers depth.

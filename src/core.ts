@@ -195,6 +195,11 @@ export interface TaskSnapshot {
 
 export type ResearchSourceKind = "doc" | "code" | "upstream" | "user" | "command" | "web";
 export type ResearchConfidence = "low" | "medium" | "high";
+export type ResearchReviewStatus = "draft" | "reviewed";
+export type ResearchQuestionStatus = "open" | "answered" | "blocked";
+export type ResearchPriority = "low" | "normal" | "high";
+export type ResearchFindingStatus = "active" | "conflicting" | "superseded";
+export type ResearchRiskStatus = "open" | "mitigated" | "accepted";
 
 export interface ResearchItem {
   id: string;
@@ -204,16 +209,65 @@ export interface ResearchItem {
   details?: string;
 }
 
+export interface ResearchQuestion {
+  id: string;
+  text: string;
+  status: ResearchQuestionStatus;
+  priority: ResearchPriority;
+  sourcePackIds: string[];
+  answer?: string;
+  blockedReason?: string;
+  createdAt: string;
+  updatedAt: string;
+  answeredAt?: string;
+}
+
+export interface ResearchFinding {
+  id: string;
+  claim: string;
+  status: ResearchFindingStatus;
+  confidence: ResearchConfidence;
+  questionId?: string;
+  sourcePackIds: string[];
+  risks: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResearchDecision {
+  id: string;
+  decision: string;
+  rationale: string;
+  sourcePackIds: string[];
+  alternatives: string[];
+  acceptedAt: string;
+}
+
+export interface ResearchRisk {
+  id: string;
+  text: string;
+  status: ResearchRiskStatus;
+  sourcePackIds: string[];
+  createdAt: string;
+  resolvedAt?: string;
+}
+
 export interface ResearchSourcePack {
   id: string;
   kind: ResearchSourceKind;
   source: string;
-  reviewedAt: string;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewStatus: ResearchReviewStatus;
   claim: string;
   excerpt: string;
   confidence: ResearchConfidence;
   openRisks: string[];
   relatedItemIds: string[];
+  questionIds: string[];
+  extractedFrom?: string;
+  lineRange?: string;
+  staleAfter?: string;
 }
 
 export interface ResearchSourceInput {
@@ -222,8 +276,23 @@ export interface ResearchSourceInput {
   claim: string;
   excerpt?: string;
   confidence?: ResearchConfidence;
+  reviewStatus?: ResearchReviewStatus;
   openRisks?: string[];
   relatedItemIds?: string[];
+  questionIds?: string[];
+  extractedFrom?: string;
+  lineRange?: string;
+  staleAfter?: string;
+}
+
+export interface ResearchSourceExtractionInput {
+  source: string;
+  claim: string;
+  confidence?: ResearchConfidence;
+  reviewStatus?: ResearchReviewStatus;
+  questionIds?: string[];
+  openRisks?: string[];
+  staleAfter?: string;
 }
 
 export interface ResearchState {
@@ -236,6 +305,10 @@ export interface ResearchState {
   openRisks: string[];
   items: ResearchItem[];
   sourcePacks: ResearchSourcePack[];
+  questions: ResearchQuestion[];
+  findingRecords: ResearchFinding[];
+  decisionRecords: ResearchDecision[];
+  riskRecords: ResearchRisk[];
 }
 
 export type ClarificationStatus = "not_required" | "collecting" | "ready" | "skipped";
@@ -1464,19 +1537,25 @@ export async function readTaskResearch(root: string, taskId: string): Promise<Re
     const parsed = JSON.parse(await readFile(researchPath, "utf8")) as Partial<ResearchState>;
     if (typeof parsed.taskId !== "string" || typeof parsed.updatedAt !== "string") return undefined;
     const sourcePacks = mergeResearchSourcePacks(
-      Array.isArray(parsed.sourcePacks) ? parsed.sourcePacks.filter(isResearchSourcePack) : [],
+      Array.isArray(parsed.sourcePacks) ? parsed.sourcePacks.map(normalizeResearchSourcePack).filter(isDefined) : [],
       await readResearchSourcePacksFile(root, taskId),
     );
+    const questions = Array.isArray(parsed.questions) ? parsed.questions.filter(isResearchQuestion) : [];
+    const legacyOpenQuestions = normalizeStringArray(parsed.openQuestions);
     return {
       taskId: parsed.taskId,
       updatedAt: parsed.updatedAt,
       generatedFrom: typeof parsed.generatedFrom === "string" ? parsed.generatedFrom : undefined,
-      openQuestions: normalizeStringArray(parsed.openQuestions),
+      openQuestions: legacyOpenQuestions,
       decisions: normalizeStringArray(parsed.decisions),
       findings: normalizeStringArray(parsed.findings),
       openRisks: normalizeStringArray(parsed.openRisks),
       items: Array.isArray(parsed.items) ? parsed.items.filter(isResearchItem) : [],
       sourcePacks,
+      questions: questions.length > 0 ? questions : legacyOpenQuestions.map((text, index) => createResearchQuestion(`Q${index + 1}`, text, parsed.updatedAt, "normal")),
+      findingRecords: Array.isArray(parsed.findingRecords) ? parsed.findingRecords.filter(isResearchFinding) : [],
+      decisionRecords: Array.isArray(parsed.decisionRecords) ? parsed.decisionRecords.filter(isResearchDecision) : [],
+      riskRecords: Array.isArray(parsed.riskRecords) ? parsed.riskRecords.filter(isResearchRisk) : [],
     };
   } catch {
     return undefined;
@@ -1764,6 +1843,84 @@ export async function addTaskResearchNote(
   return state;
 }
 
+export async function addTaskResearchQuestion(
+  root: string,
+  taskId: string,
+  text: string,
+  options: { priority?: ResearchPriority; sourcePackIds?: string[] } = {},
+): Promise<ResearchState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const trimmed = text.trim();
+  if (!trimmed) return readTaskResearch(root, taskId);
+  const now = new Date().toISOString();
+  const state = await getOrCreateResearchState(root, task.id, now, "research_question");
+  const question = createResearchQuestion(`Q${state.questions.length + 1}`, trimmed, now, options.priority || "normal", options.sourcePackIds);
+  state.questions.push(question);
+  state.openQuestions = dedupeStrings([...state.openQuestions, trimmed]);
+  return persistResearchUpdate(root, task, state, "research_question_added", { id: question.id, text: question.text, priority: question.priority });
+}
+
+export async function answerTaskResearchQuestion(
+  root: string,
+  taskId: string,
+  questionId: string,
+  answer: string,
+  options: { sourcePackIds?: string[]; blockedReason?: string } = {},
+): Promise<ResearchState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const now = new Date().toISOString();
+  const state = await getOrCreateResearchState(root, task.id, now, "research_answer");
+  const trimmedAnswer = answer.trim();
+  let updated = false;
+  state.questions = state.questions.map(question => {
+    if (question.id !== questionId) return question;
+    updated = true;
+    const blocked = options.blockedReason?.trim();
+    return {
+      ...question,
+      status: blocked ? "blocked" : "answered",
+      answer: blocked ? question.answer : trimmedAnswer,
+      blockedReason: blocked || undefined,
+      sourcePackIds: dedupeStrings([...(question.sourcePackIds || []), ...(options.sourcePackIds || [])]),
+      updatedAt: now,
+      answeredAt: blocked ? question.answeredAt : now,
+    };
+  });
+  if (!updated) return state;
+  state.openQuestions = state.questions.filter(question => question.status !== "answered").map(question => question.text);
+  if (trimmedAnswer) state.findings = dedupeStrings([...state.findings, trimmedAnswer]);
+  return persistResearchUpdate(root, task, state, "research_question_answered", { id: questionId, blocked: !!options.blockedReason });
+}
+
+export async function addTaskResearchDecision(
+  root: string,
+  taskId: string,
+  decision: string,
+  rationale: string,
+  options: { sourcePackIds?: string[]; alternatives?: string[] } = {},
+): Promise<ResearchState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const trimmedDecision = decision.trim();
+  const trimmedRationale = rationale.trim();
+  if (!trimmedDecision || !trimmedRationale) return readTaskResearch(root, taskId);
+  const now = new Date().toISOString();
+  const state = await getOrCreateResearchState(root, task.id, now, "research_decision");
+  const record: ResearchDecision = {
+    id: `D${state.decisionRecords.length + 1}`,
+    decision: trimmedDecision,
+    rationale: trimmedRationale,
+    sourcePackIds: dedupeStrings(options.sourcePackIds || []),
+    alternatives: dedupeStrings(options.alternatives || []),
+    acceptedAt: now,
+  };
+  state.decisionRecords.push(record);
+  state.decisions = dedupeStrings([...state.decisions, `${trimmedDecision} — ${trimmedRationale}`]);
+  return persistResearchUpdate(root, task, state, "research_decision_added", { id: record.id, decision: record.decision });
+}
+
 export async function addTaskResearchSourcePack(
   root: string,
   taskId: string,
@@ -1775,32 +1932,93 @@ export async function addTaskResearchSourcePack(
   const claim = input.claim.trim();
   if (!source || !claim) return readTaskResearch(root, taskId);
   const now = new Date().toISOString();
-  const existing = await readTaskResearch(root, taskId);
-  const state = existing || createResearchState(taskId, [], now, "created_from_source_pack");
+  const state = await getOrCreateResearchState(root, task.id, now, "created_from_source_pack");
+  const reviewStatus = input.reviewStatus || "reviewed";
   const pack: ResearchSourcePack = {
     id: `S${state.sourcePacks.length + 1}`,
     kind: input.kind || inferResearchSourceKind(source),
     source,
-    reviewedAt: now,
+    createdAt: now,
+    reviewedAt: reviewStatus === "reviewed" ? now : undefined,
+    reviewStatus,
     claim,
     excerpt: (input.excerpt || claim).trim(),
     confidence: input.confidence || "medium",
     openRisks: dedupeStrings(input.openRisks || []).slice(0, 8),
     relatedItemIds: dedupeStrings(input.relatedItemIds || []).slice(0, 8),
+    questionIds: dedupeStrings(input.questionIds || []).slice(0, 8),
+    extractedFrom: input.extractedFrom,
+    lineRange: input.lineRange,
+    staleAfter: input.staleAfter,
   };
   state.sourcePacks.push(pack);
   state.findings = dedupeStrings([...state.findings, claim]);
-  if (pack.openRisks.length > 0) state.openRisks = dedupeStrings([...state.openRisks, ...pack.openRisks]);
-  state.updatedAt = now;
-  state.generatedFrom = "research_source_pack";
-  await writeResearchFiles(root, task, state);
-  await appendTaskEvent(root, task.id, {
-    type: "research_source_added",
-    timestamp: now,
-    data: { id: pack.id, kind: pack.kind, source: pack.source, confidence: pack.confidence, claim: pack.claim },
+  state.findingRecords.push({
+    id: `F${state.findingRecords.length + 1}`,
+    claim,
+    status: "active",
+    confidence: pack.confidence,
+    questionId: pack.questionIds[0],
+    sourcePackIds: [pack.id],
+    risks: pack.openRisks,
+    createdAt: now,
+    updatedAt: now,
   });
-  await writeTaskInfo(root, task, "research_source_added", { force: true });
-  await writeTaskHandoff(root, task, "research_source_added");
+  for (const riskText of pack.openRisks) {
+    state.riskRecords.push({ id: `K${state.riskRecords.length + 1}`, text: riskText, status: "open", sourcePackIds: [pack.id], createdAt: now });
+  }
+  if (pack.openRisks.length > 0) state.openRisks = dedupeStrings([...state.openRisks, ...pack.openRisks]);
+  return persistResearchUpdate(root, task, state, "research_source_added", { id: pack.id, kind: pack.kind, source: pack.source, confidence: pack.confidence, reviewStatus: pack.reviewStatus, claim: pack.claim });
+}
+
+export async function extractTaskResearchSourcePack(
+  root: string,
+  taskId: string,
+  input: ResearchSourceExtractionInput,
+): Promise<ResearchState | undefined> {
+  const extracted = await extractLocalSourceExcerpt(root, input.source);
+  if (!extracted) return readTaskResearch(root, taskId);
+  return addTaskResearchSourcePack(root, taskId, {
+    source: extracted.source,
+    claim: input.claim,
+    excerpt: extracted.excerpt,
+    confidence: input.confidence || "medium",
+    reviewStatus: input.reviewStatus || "draft",
+    questionIds: input.questionIds,
+    openRisks: input.openRisks,
+    extractedFrom: extracted.file,
+    lineRange: extracted.lineRange,
+    staleAfter: input.staleAfter,
+  });
+}
+
+export async function reviewTaskResearchSourcePack(root: string, taskId: string, sourcePackId: string): Promise<ResearchState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const now = new Date().toISOString();
+  const state = await getOrCreateResearchState(root, task.id, now, "research_source_reviewed");
+  let reviewed = false;
+  state.sourcePacks = state.sourcePacks.map(pack => {
+    if (pack.id !== sourcePackId) return pack;
+    reviewed = true;
+    return { ...pack, reviewStatus: "reviewed", reviewedAt: now };
+  });
+  if (!reviewed) return state;
+  return persistResearchUpdate(root, task, state, "research_source_reviewed", { id: sourcePackId });
+}
+
+async function getOrCreateResearchState(root: string, taskId: string, now: string, generatedFrom: string): Promise<ResearchState> {
+  return await readTaskResearch(root, taskId) || createResearchState(taskId, [], now, generatedFrom);
+}
+
+async function persistResearchUpdate(root: string, task: TaskState, state: ResearchState, eventType: string, data: Record<string, unknown>): Promise<ResearchState> {
+  const now = new Date().toISOString();
+  state.updatedAt = now;
+  state.generatedFrom = eventType;
+  await writeResearchFiles(root, task, state);
+  await appendTaskEvent(root, task.id, { type: eventType, timestamp: now, data });
+  await writeTaskInfo(root, task, eventType, { force: true });
+  await writeTaskHandoff(root, task, eventType);
   return state;
 }
 
@@ -5172,22 +5390,71 @@ function normalizeClarificationAxes(value: unknown): ClarificationAxis[] {
   return Array.isArray(value) ? dedupeClarificationAxes(value.filter(isClarificationAxis)) : [];
 }
 
+function createResearchQuestion(id: string, text: string, now: string, priority: ResearchPriority, sourcePackIds: string[] = []): ResearchQuestion {
+  return {
+    id,
+    text,
+    status: "open",
+    priority,
+    sourcePackIds: dedupeStrings(sourcePackIds),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+async function extractLocalSourceExcerpt(root: string, source: string): Promise<{ source: string; file: string; lineRange?: string; excerpt: string } | undefined> {
+  const parsed = parseLocalSourceSelector(source);
+  if (!parsed) return undefined;
+  const absolute = path.resolve(root, parsed.file);
+  const relative = path.relative(root, absolute);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+  if (!(await pathExists(absolute))) return undefined;
+  const content = await readFile(absolute, "utf8").catch(() => "");
+  if (!content) return undefined;
+  const lines = content.split(/\r?\n/);
+  const start = parsed.start ? Math.max(1, parsed.start) : 1;
+  const end = parsed.end ? Math.max(start, parsed.end) : parsed.start ? start : Math.min(lines.length, 40);
+  const excerptLines = lines.slice(start - 1, Math.min(end, lines.length));
+  if (excerptLines.length === 0) return undefined;
+  const normalizedFile = relative.replaceAll("\\", "/");
+  const lineRange = `${start}-${Math.min(end, lines.length)}`;
+  return {
+    source: `${normalizedFile}:${lineRange}`,
+    file: normalizedFile,
+    lineRange,
+    excerpt: excerptLines.map((line, index) => `${start + index}:${line}`).join("\n"),
+  };
+}
+
+function parseLocalSourceSelector(source: string): { file: string; start?: number; end?: number } | undefined {
+  const trimmed = source.trim();
+  if (!trimmed || /^https?:\/\//i.test(trimmed)) return undefined;
+  const match = trimmed.match(/^(.*?):(\d+)(?:-(\d+))?$/);
+  if (!match) return { file: trimmed };
+  return { file: match[1] || "", start: Number.parseInt(match[2] || "1", 10), end: match[3] ? Number.parseInt(match[3], 10) : undefined };
+}
+
 function createResearchState(
   taskId: string,
   openQuestions: string[],
   now: string,
   generatedFrom = "created",
 ): ResearchState {
+  const filteredQuestions = openQuestions.filter(item => item && item !== "None captured from the initial request.");
   return {
     taskId,
     updatedAt: now,
     generatedFrom,
-    openQuestions: openQuestions.filter(item => item && item !== "None captured from the initial request."),
+    openQuestions: filteredQuestions,
     decisions: [],
     findings: [],
     openRisks: [],
     items: [],
     sourcePacks: [],
+    questions: filteredQuestions.map((text, index) => createResearchQuestion(`Q${index + 1}`, text, now, "normal")),
+    findingRecords: [],
+    decisionRecords: [],
+    riskRecords: [],
   };
 }
 
@@ -5208,6 +5475,7 @@ async function writeResearchFiles(root: string, task: TaskState, state: Research
   await writeFile(path.join(researchDir, "research.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
   await writeFile(path.join(researchDir, "source-packs.json"), `${JSON.stringify({ taskId: state.taskId, updatedAt: state.updatedAt, sourcePacks: state.sourcePacks }, null, 2)}\n`, "utf8");
   await writeFile(path.join(researchDir, "notes.md"), formatResearchNotes(task, state), "utf8");
+  await writeFile(path.join(researchDir, "handoff.md"), formatResearchWorkflowHandoff(task, state), "utf8");
 }
 
 function formatResearchNotes(task: TaskState, state: ResearchState): string {
@@ -5219,21 +5487,21 @@ function formatResearchNotes(task: TaskState, state: ResearchState): string {
     `Updated: ${state.updatedAt}`,
     state.generatedFrom ? `Reason: ${state.generatedFrom}` : undefined,
     "",
-    "## Open Questions",
+    "## Questions",
     "",
-    formatResumeList(state.openQuestions, "No open research questions recorded."),
+    state.questions.length === 0 ? "No research questions recorded." : state.questions.map(formatResearchQuestion).join("\n"),
     "",
     "## Findings",
     "",
-    formatResumeList(state.findings, "No research findings recorded."),
+    state.findingRecords.length === 0 ? formatResumeList(state.findings, "No research findings recorded.") : state.findingRecords.map(formatResearchFinding).join("\n"),
     "",
     "## Decisions",
     "",
-    formatResumeList(state.decisions, "No research decisions recorded."),
+    state.decisionRecords.length === 0 ? formatResumeList(state.decisions, "No research decisions recorded.") : state.decisionRecords.map(formatResearchDecision).join("\n"),
     "",
-    "## Open Risks",
+    "## Risks",
     "",
-    formatResumeList(state.openRisks, "No open research risks recorded."),
+    state.riskRecords.length === 0 ? formatResumeList(state.openRisks, "No open research risks recorded.") : state.riskRecords.map(formatResearchRisk).join("\n"),
     "",
     "## Source Packs",
     "",
@@ -5251,11 +5519,12 @@ export function formatResearchSummary(state: ResearchState, max = 8): string {
   return [
     `research items: ${state.items.length}`,
     `source packs: ${state.sourcePacks.length}${confidence ? ` (${confidence})` : ""}`,
-    `findings: ${state.findings.length}`,
-    `open questions: ${state.openQuestions.length}`,
-    `open risks: ${state.openRisks.length}`,
-    `decisions: ${state.decisions.length}`,
-    state.sourcePacks.length > 0 ? ["source packs:", ...state.sourcePacks.slice(-max).map(item => `- ${item.id}: ${item.kind} ${item.source} [${item.confidence}] ${item.claim}`)].join("\n") : "source packs: none",
+    `questions: ${state.questions.filter(question => question.status === "answered").length} answered, ${state.questions.filter(question => question.status === "blocked").length} blocked, ${state.questions.filter(question => question.status === "open").length} open`,
+    `findings: ${state.findingRecords.length || state.findings.length}`,
+    `open risks: ${state.riskRecords.filter(risk => risk.status === "open").length || state.openRisks.length}`,
+    `decisions: ${state.decisionRecords.length || state.decisions.length}`,
+    state.sourcePacks.length > 0 ? ["source packs:", ...state.sourcePacks.slice(-max).map(item => `- ${item.id}: ${item.kind} ${item.source} [${item.reviewStatus}/${item.confidence}] ${item.claim}`)].join("\n") : "source packs: none",
+    state.questions.length > 0 ? ["questions:", ...state.questions.slice(-max).map(item => `- ${item.id} [${item.status}/${item.priority}]: ${item.text}${item.answer ? ` => ${summarizeUnknown(item.answer, 120)}` : ""}`)].join("\n") : "questions: none",
     state.items.length > 0 ? ["recent research:", ...state.items.slice(-max).map(item => `- ${item.id}: ${item.summary}`)].join("\n") : "recent research: none",
   ].join("\n");
 }
@@ -5266,8 +5535,13 @@ function formatResearchSourcePack(pack: ResearchSourcePack): string {
     "",
     `- kind: ${pack.kind}`,
     `- source: ${pack.source}`,
-    `- reviewed: ${pack.reviewedAt}`,
+    `- status: ${pack.reviewStatus}`,
+    `- created: ${pack.createdAt}`,
+    pack.reviewedAt ? `- reviewed: ${pack.reviewedAt}` : undefined,
     `- confidence: ${pack.confidence}`,
+    pack.extractedFrom ? `- extracted from: ${pack.extractedFrom}${pack.lineRange ? `:${pack.lineRange}` : ""}` : undefined,
+    pack.staleAfter ? `- stale after: ${pack.staleAfter}` : undefined,
+    pack.questionIds.length > 0 ? `- questions: ${pack.questionIds.join(", ")}` : undefined,
     pack.relatedItemIds.length > 0 ? `- related items: ${pack.relatedItemIds.join(", ")}` : undefined,
     pack.openRisks.length > 0 ? `- open risks: ${pack.openRisks.join("; ")}` : undefined,
     "",
@@ -5281,6 +5555,47 @@ function summarizeResearchConfidence(sourcePacks: ResearchSourcePack[]): string 
   const medium = sourcePacks.filter(pack => pack.confidence === "medium").length;
   const low = sourcePacks.length - high - medium;
   return `high ${high}, medium ${medium}, low ${low}`;
+}
+
+function formatResearchQuestion(question: ResearchQuestion): string {
+  return `- ${question.id} [${question.status}/${question.priority}] ${question.text}${question.answer ? ` => ${summarizeUnknown(question.answer, 180)}` : ""}${question.blockedReason ? ` (blocked: ${summarizeUnknown(question.blockedReason, 120)})` : ""}${question.sourcePackIds.length > 0 ? ` sources: ${question.sourcePackIds.join(",")}` : ""}`;
+}
+
+function formatResearchFinding(finding: ResearchFinding): string {
+  return `- ${finding.id} [${finding.status}/${finding.confidence}] ${finding.claim}${finding.questionId ? ` question: ${finding.questionId}` : ""}${finding.sourcePackIds.length > 0 ? ` sources: ${finding.sourcePackIds.join(",")}` : ""}${finding.risks.length > 0 ? ` risks: ${finding.risks.join("; ")}` : ""}`;
+}
+
+function formatResearchDecision(decision: ResearchDecision): string {
+  return `- ${decision.id}: ${decision.decision} — ${decision.rationale}${decision.sourcePackIds.length > 0 ? ` sources: ${decision.sourcePackIds.join(",")}` : ""}${decision.alternatives.length > 0 ? ` alternatives: ${decision.alternatives.join("; ")}` : ""}`;
+}
+
+function formatResearchRisk(risk: ResearchRisk): string {
+  return `- ${risk.id} [${risk.status}] ${risk.text}${risk.sourcePackIds.length > 0 ? ` sources: ${risk.sourcePackIds.join(",")}` : ""}`;
+}
+
+function formatResearchWorkflowHandoff(task: TaskState, state: ResearchState): string {
+  const answered = state.questions.filter(question => question.status === "answered");
+  const reviewed = state.sourcePacks.filter(pack => pack.reviewStatus === "reviewed");
+  return [
+    "# Research Workflow Handoff",
+    "",
+    `Task: ${task.id}`,
+    `Title: ${task.title}`,
+    `Updated: ${state.updatedAt}`,
+    "",
+    "## Implementation Handoff",
+    "",
+    answered.length === 0 ? "No answered research questions recorded." : answered.map(formatResearchQuestion).join("\n"),
+    reviewed.length === 0 ? "No reviewed source packs recorded." : reviewed.map(pack => `- ${pack.id}: ${pack.claim} (${pack.source})`).join("\n"),
+    state.decisionRecords.length === 0 ? "No research decisions recorded." : state.decisionRecords.map(formatResearchDecision).join("\n"),
+    "",
+    "## Check Handoff",
+    "",
+    state.findingRecords.length === 0 ? "No findings to verify." : state.findingRecords.map(formatResearchFinding).join("\n"),
+    state.riskRecords.filter(risk => risk.status === "open").length === 0 ? "No open research risks recorded." : state.riskRecords.filter(risk => risk.status === "open").map(formatResearchRisk).join("\n"),
+    state.sourcePacks.filter(pack => pack.reviewStatus === "draft").length === 0 ? "No draft source packs remain." : state.sourcePacks.filter(pack => pack.reviewStatus === "draft").map(pack => `- Draft ${pack.id}: ${pack.source}`).join("\n"),
+    "",
+  ].join("\n");
 }
 function formatResearchItem(item: ResearchItem): string {
   return [
@@ -5380,18 +5695,53 @@ function isResearchItem(value: unknown): value is ResearchItem {
     (record.details === undefined || typeof record.details === "string");
 }
 
-function isResearchSourcePack(value: unknown): value is ResearchSourcePack {
+function normalizeResearchSourcePack(value: unknown): ResearchSourcePack | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || !isResearchSourceKind(record.kind) || typeof record.source !== "string" || typeof record.claim !== "string" || typeof record.excerpt !== "string" || !isResearchConfidence(record.confidence)) return undefined;
+  const createdAt = typeof record.createdAt === "string" ? record.createdAt : typeof record.reviewedAt === "string" ? record.reviewedAt : new Date(0).toISOString();
+  const reviewStatus: ResearchReviewStatus = isResearchReviewStatus(record.reviewStatus) ? record.reviewStatus : "reviewed";
+  return {
+    id: record.id,
+    kind: record.kind,
+    source: record.source,
+    createdAt,
+    reviewedAt: typeof record.reviewedAt === "string" ? record.reviewedAt : reviewStatus === "reviewed" ? createdAt : undefined,
+    reviewStatus,
+    claim: record.claim,
+    excerpt: record.excerpt,
+    confidence: record.confidence,
+    openRisks: normalizeStringArray(record.openRisks).slice(0, 8),
+    relatedItemIds: normalizeStringArray(record.relatedItemIds).slice(0, 8),
+    questionIds: normalizeStringArray(record.questionIds).slice(0, 8),
+    extractedFrom: typeof record.extractedFrom === "string" ? record.extractedFrom : undefined,
+    lineRange: typeof record.lineRange === "string" ? record.lineRange : undefined,
+    staleAfter: typeof record.staleAfter === "string" ? record.staleAfter : undefined,
+  };
+}
+
+function isResearchQuestion(value: unknown): value is ResearchQuestion {
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
-  return typeof record.id === "string" &&
-    isResearchSourceKind(record.kind) &&
-    typeof record.source === "string" &&
-    typeof record.reviewedAt === "string" &&
-    typeof record.claim === "string" &&
-    typeof record.excerpt === "string" &&
-    isResearchConfidence(record.confidence) &&
-    Array.isArray(record.openRisks) && record.openRisks.every(item => typeof item === "string") &&
-    Array.isArray(record.relatedItemIds) && record.relatedItemIds.every(item => typeof item === "string");
+  return typeof record.id === "string" && typeof record.text === "string" && isResearchQuestionStatus(record.status) && isResearchPriority(record.priority) && Array.isArray(record.sourcePackIds) && record.sourcePackIds.every(item => typeof item === "string") && typeof record.createdAt === "string" && typeof record.updatedAt === "string";
+}
+
+function isResearchFinding(value: unknown): value is ResearchFinding {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" && typeof record.claim === "string" && isResearchFindingStatus(record.status) && isResearchConfidence(record.confidence) && Array.isArray(record.sourcePackIds) && record.sourcePackIds.every(item => typeof item === "string") && Array.isArray(record.risks) && record.risks.every(item => typeof item === "string") && typeof record.createdAt === "string" && typeof record.updatedAt === "string";
+}
+
+function isResearchDecision(value: unknown): value is ResearchDecision {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" && typeof record.decision === "string" && typeof record.rationale === "string" && Array.isArray(record.sourcePackIds) && record.sourcePackIds.every(item => typeof item === "string") && Array.isArray(record.alternatives) && record.alternatives.every(item => typeof item === "string") && typeof record.acceptedAt === "string";
+}
+
+function isResearchRisk(value: unknown): value is ResearchRisk {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" && typeof record.text === "string" && isResearchRiskStatus(record.status) && Array.isArray(record.sourcePackIds) && record.sourcePackIds.every(item => typeof item === "string") && typeof record.createdAt === "string";
 }
 
 function isResearchSourceKind(value: unknown): value is ResearchSourceKind {
@@ -5400,6 +5750,26 @@ function isResearchSourceKind(value: unknown): value is ResearchSourceKind {
 
 function isResearchConfidence(value: unknown): value is ResearchConfidence {
   return value === "low" || value === "medium" || value === "high";
+}
+
+function isResearchReviewStatus(value: unknown): value is ResearchReviewStatus {
+  return value === "draft" || value === "reviewed";
+}
+
+function isResearchQuestionStatus(value: unknown): value is ResearchQuestionStatus {
+  return value === "open" || value === "answered" || value === "blocked";
+}
+
+function isResearchPriority(value: unknown): value is ResearchPriority {
+  return value === "low" || value === "normal" || value === "high";
+}
+
+function isResearchFindingStatus(value: unknown): value is ResearchFindingStatus {
+  return value === "active" || value === "conflicting" || value === "superseded";
+}
+
+function isResearchRiskStatus(value: unknown): value is ResearchRiskStatus {
+  return value === "open" || value === "mitigated" || value === "accepted";
 }
 
 function inferResearchSourceKind(source: string): ResearchSourceKind {
@@ -5422,7 +5792,7 @@ async function readResearchSourcePacksFile(root: string, taskId: string): Promis
       : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).sourcePacks)
       ? (parsed as Record<string, unknown>).sourcePacks
       : [];
-    return candidate.filter(isResearchSourcePack);
+    return candidate.map(normalizeResearchSourcePack).filter(isDefined);
   } catch {
     return [];
   }
@@ -6367,6 +6737,58 @@ function taskNeedsResearchSourcePack(task: TaskState): boolean {
   return /\b(upstream|parity|trellis|everything claude code|ecc|oh my openagent|omo|superpowers)\b/.test(text) || /(上游|同等|参考)/.test(text);
 }
 
+function buildResearchReadinessSignals(research: ResearchState | undefined): { warnings: string[]; nextActions: string[]; passes: string[] } {
+  if (!research) {
+    return {
+      warnings: ["No reviewed research source pack recorded for upstream/parity work."],
+      nextActions: ["Add reviewed evidence with /research:add-source or draft local evidence with /research:extract-source before final review."],
+      passes: [],
+    };
+  }
+  const warnings: string[] = [];
+  const nextActions: string[] = [];
+  const passes: string[] = [];
+  const reviewed = research.sourcePacks.filter(pack => pack.reviewStatus === "reviewed");
+  const draft = research.sourcePacks.filter(pack => pack.reviewStatus === "draft");
+  const openQuestions = research.questions.filter(question => question.status === "open" || question.status === "blocked");
+  const lowConfidence = research.sourcePacks.filter(pack => pack.confidence === "low");
+  const stale = research.sourcePacks.filter(pack => pack.staleAfter && Date.parse(pack.staleAfter) < Date.now());
+  const conflicts = research.findingRecords.filter(finding => finding.status === "conflicting");
+  const openRisks = research.riskRecords.filter(risk => risk.status === "open");
+
+  if (reviewed.length === 0) {
+    warnings.push("No reviewed research source pack recorded for upstream/parity work.");
+    nextActions.push("Review a draft source with /research:review or add a reviewed source with /research:add-source.");
+  } else {
+    passes.push(`Reviewed research source packs recorded: ${reviewed.length}.`);
+  }
+  if (openQuestions.length > 0) {
+    warnings.push(`${openQuestions.length} research question(s) remain open or blocked.`);
+    nextActions.push(`Answer or block ${openQuestions[0]?.id}: ${openQuestions[0]?.text}`);
+  }
+  if (draft.length > 0) {
+    warnings.push(`${draft.length} draft research source pack(s) still need review.`);
+    nextActions.push(`Review draft source pack ${draft[0]?.id} with /research:review.`);
+  }
+  if (lowConfidence.length > 0 && reviewed.length < 2) {
+    warnings.push("Low-confidence research evidence has no second reviewed source.");
+    nextActions.push("Add a second reviewed source or raise confidence with reviewed evidence.");
+  }
+  if (stale.length > 0) {
+    warnings.push(`${stale.length} research source pack(s) are stale.`);
+    nextActions.push(`Refresh stale source pack ${stale[0]?.id}.`);
+  }
+  if (conflicts.length > 0) {
+    warnings.push(`${conflicts.length} conflicting research finding(s) remain unresolved.`);
+    nextActions.push(`Resolve conflicting finding ${conflicts[0]?.id}.`);
+  }
+  if (openRisks.length > 0) {
+    warnings.push(`${openRisks.length} open research risk(s) remain.`);
+    nextActions.push(`Mitigate or accept research risk ${openRisks[0]?.id}.`);
+  }
+  return { warnings, nextActions, passes };
+}
+
 async function buildReadinessState(root: string, task: TaskState, reason: string): Promise<ReadinessState> {
   const currentTask = await loadTask(root, task.id) || task;
   const [acceptance, verification, plan, clarification, strategy, research] = await Promise.all([
@@ -6442,12 +6864,10 @@ async function buildReadinessState(root: string, task: TaskState, reason: string
     nextActions.push(...strategy.policy.coverageGaps.slice(0, 4));
   }
   if (taskNeedsResearchSourcePack(currentTask)) {
-    if (!research || research.sourcePacks.length === 0) {
-      warnings.push("No reviewed research source pack recorded for upstream/parity work.");
-      nextActions.push("Add a reviewed source with /research:add-source before final review.");
-    } else {
-      passes.push(`Research source packs recorded: ${research.sourcePacks.length}.`);
-    }
+    const researchSignals = buildResearchReadinessSignals(research);
+    warnings.push(...researchSignals.warnings);
+    nextActions.push(...researchSignals.nextActions);
+    passes.push(...researchSignals.passes);
   }
 
   if (currentTask.counters.failedToolCalls > 0) {

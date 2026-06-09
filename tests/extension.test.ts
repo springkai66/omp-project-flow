@@ -84,6 +84,11 @@ describe("project flow extension", () => {
       expect(fake.commands.has("research:add")).toBe(true);
       expect(fake.commands.has("research:summary")).toBe(true);
       expect(fake.commands.has("research:add-source")).toBe(true);
+      expect(fake.commands.has("research:extract-source")).toBe(true);
+      expect(fake.commands.has("research:review")).toBe(true);
+      expect(fake.commands.has("research:question")).toBe(true);
+      expect(fake.commands.has("research:answer")).toBe(true);
+      expect(fake.commands.has("research:decision")).toBe(true);
       expect(fake.commands.has("verify:status")).toBe(true);
       expect(fake.commands.has("verify:suggest")).toBe(true);
       expect(fake.commands.has("verify:refresh")).toBe(true);
@@ -295,6 +300,17 @@ describe("project flow extension", () => {
       expect(fake.notifications.at(-1)?.message).toContain("Research summary");
       expect(fake.notifications.at(-1)?.message).toContain("docs/gaps.md");
 
+
+      await writeFile(path.join(root, "evidence.md"), "first\nsecond\n", "utf8");
+      await fake.commands.get("research:question").handler('--text "What evidence closes this?" --priority high', fake.ctx(root));
+      await fake.commands.get("research:extract-source").handler('--source evidence.md:1-2 --claim "Evidence extracted locally" --confidence medium', fake.ctx(root));
+      await fake.commands.get("research:review").handler("--id S2", fake.ctx(root));
+      await fake.commands.get("research:answer").handler('--id Q1 --answer "Evidence closes this" --source-packs S2', fake.ctx(root));
+      await fake.commands.get("research:decision").handler('--decision "Use local workflow" --rationale "Reviewed evidence exists" --source-packs S2', fake.ctx(root));
+      const workflowResearch = await readTaskResearch(root, task.id);
+      expect(workflowResearch?.questions[0]?.status).toBe("answered");
+      expect(workflowResearch?.sourcePacks[1]?.reviewStatus).toBe("reviewed");
+      expect(workflowResearch?.decisionRecords[0]?.decision).toBe("Use local workflow");
       await fake.commands.get("research:status").handler("", fake.ctx(root));
       expect(fake.notifications.at(-1)?.message).toContain(`Research for ${task.id}`);
       expect(fake.notifications.at(-1)?.message).toContain("Found a useful API detail");

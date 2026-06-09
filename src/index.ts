@@ -1,9 +1,12 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ActiveTaskScope, AutoSubtaskMode, ClarificationAxis, ClarificationState, ResearchConfidence, ResearchSourceKind, SubtaskPlanTemplate, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
+import type { ActiveTaskScope, AutoSubtaskMode, ClarificationAxis, ClarificationState, ResearchConfidence, ResearchPriority, ResearchReviewStatus, ResearchSourceKind, SubtaskPlanTemplate, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
   addTaskResearchSourcePack,
+  addTaskResearchQuestion,
+  addTaskResearchDecision,
+  answerTaskResearchQuestion,
   answerTaskClarification,
   applySubtaskPlan,
   applySpecProposal,
@@ -14,6 +17,7 @@ import {
   createTask,
   ensureProject,
   findProjectRoot,
+  extractTaskResearchSourcePack,
   finishActiveTask,
   finishVerificationRemediationAttempt,
   formatAcceptanceSummary,
@@ -58,6 +62,7 @@ import {
   refreshVerificationStrategy,
   recordToolEvent,
   resolveTask,
+  reviewTaskResearchSourcePack,
   resolveSpecProposal,
   setActiveTask,
   setPlanStepStatus,
@@ -725,6 +730,108 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         return;
       }
       ctx.ui.notify(formatResearchSummary(research, 8), "info");
+    },
+  });
+
+  pi.registerCommand("research:extract-source", {
+    description: "Create a draft research source pack from an explicit local file or line range",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const parsed = parseResearchSourceArgs(args);
+      if (!parsed.source || !parsed.claim) {
+        ctx.ui.notify("Usage: /research:extract-source --source <local-file[:start-end]> --claim <claim> [--confidence low|medium|high] [--reviewed]", "warning");
+        return;
+      }
+      const research = await extractTaskResearchSourcePack(root, task.id, parsed);
+      if (!research) {
+        ctx.ui.notify(`Could not extract a local source for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(formatResearchSummary(research, 8), "info");
+    },
+  });
+
+  pi.registerCommand("research:review", {
+    description: "Mark a draft research source pack as reviewed",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const values = parseFlagValues(args);
+      const id = values.id || args.trim();
+      if (!id) {
+        ctx.ui.notify("Usage: /research:review --id S1", "warning");
+        return;
+      }
+      const research = await reviewTaskResearchSourcePack(root, task.id, id);
+      ctx.ui.notify(research ? formatResearchSummary(research, 8) : `Could not review source pack ${id}.`, research ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("research:question", {
+    description: "Add a structured research question to the active task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const values = parseFlagValues(args);
+      const text = values.text || args.trim();
+      if (!text) {
+        ctx.ui.notify("Usage: /research:question --text <question> [--priority low|normal|high]", "warning");
+        return;
+      }
+      const priority = values.priority && isResearchPriorityArg(values.priority) ? values.priority : undefined;
+      const research = await addTaskResearchQuestion(root, task.id, text, { priority });
+      ctx.ui.notify(research ? formatResearchSummary(research, 8) : "Could not add research question.", research ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("research:answer", {
+    description: "Answer a structured research question with source pack links",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const values = parseFlagValues(args);
+      if (!values.id || !values.answer) {
+        ctx.ui.notify("Usage: /research:answer --id Q1 --answer <answer> [--source-packs S1,S2]", "warning");
+        return;
+      }
+      const research = await answerTaskResearchQuestion(root, task.id, values.id, values.answer, { sourcePackIds: splitCsv(values["source-packs"] || values.sources) });
+      ctx.ui.notify(research ? formatResearchSummary(research, 8) : `Could not answer research question ${values.id}.`, research ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("research:decision", {
+    description: "Record a research-backed decision for implementation handoff",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const values = parseFlagValues(args);
+      if (!values.decision || !values.rationale) {
+        ctx.ui.notify("Usage: /research:decision --decision <decision> --rationale <why> [--source-packs S1,S2] [--alternatives a;b]", "warning");
+        return;
+      }
+      const research = await addTaskResearchDecision(root, task.id, values.decision, values.rationale, { sourcePackIds: splitCsv(values["source-packs"] || values.sources), alternatives: splitSemicolon(values.alternatives) });
+      ctx.ui.notify(research ? formatResearchSummary(research, 8) : "Could not add research decision.", research ? "info" : "warning");
     },
   });
 
@@ -1542,18 +1649,25 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     return { action, query: queryParts.join(" "), note: noteParts.join(" ").trim() || undefined };
   }
 
-  function parseResearchSourceArgs(args: string): { source: string; claim: string; excerpt?: string; confidence?: ResearchConfidence; kind?: ResearchSourceKind; openRisks?: string[] } {
+  function parseResearchSourceArgs(args: string): { source: string; claim: string; excerpt?: string; confidence?: ResearchConfidence; kind?: ResearchSourceKind; reviewStatus?: ResearchReviewStatus; openRisks?: string[]; questionIds?: string[]; staleAfter?: string } {
     const values = parseFlagValues(args);
     const confidence = values.confidence && isResearchConfidenceArg(values.confidence) ? values.confidence : undefined;
     const kind = values.kind && isResearchSourceKindArg(values.kind) ? values.kind : undefined;
-    const openRisks = [values.risk, values.risks].filter(Boolean).flatMap(value => value!.split(/\s*;\s*/).filter(Boolean));
+    const reviewStatus = values.reviewed === "true" || values.reviewed === "yes" || args.includes("--reviewed")
+      ? "reviewed"
+      : values.reviewStatus && isResearchReviewStatusArg(values.reviewStatus)
+      ? values.reviewStatus
+      : undefined;
     return {
       source: values.source || "",
       claim: values.claim || "",
       excerpt: values.excerpt,
       confidence,
       kind,
-      openRisks,
+      reviewStatus,
+      openRisks: splitSemicolon(values.risk || values.risks),
+      questionIds: splitCsv(values.questions || values.question || values["question-ids"]),
+      staleAfter: values.staleAfter || values["stale-after"],
     };
   }
 
@@ -1587,6 +1701,22 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
 
   function isResearchSourceKindArg(value: string): value is ResearchSourceKind {
     return value === "doc" || value === "code" || value === "upstream" || value === "user" || value === "command" || value === "web";
+  }
+
+  function isResearchReviewStatusArg(value: string): value is ResearchReviewStatus {
+    return value === "draft" || value === "reviewed";
+  }
+
+  function isResearchPriorityArg(value: string): value is ResearchPriority {
+    return value === "low" || value === "normal" || value === "high";
+  }
+
+  function splitCsv(value: string | undefined): string[] {
+    return value ? value.split(",").map(item => item.trim()).filter(Boolean) : [];
+  }
+
+  function splitSemicolon(value: string | undefined): string[] {
+    return value ? value.split(/\s*;\s*/).map(item => item.trim()).filter(Boolean) : [];
   }
 
 

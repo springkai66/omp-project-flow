@@ -1,6 +1,6 @@
 {
   "name": "omp-project-flow",
-  "version": "0.24.0",
+  "version": "0.25.0",
   "description": "Project Flow workspace, task workflow, and spec injection for Oh My Pi.",
   "private": true,
   "type": "module",
@@ -34,7 +34,7 @@
   },
   "omp": {
     "name": "Project Flow",
-    "version": "0.24.0",
+    "version": "0.25.0",
     "description": "Automatic spec/task/workspace flow for Oh My Pi.",
     "extensions": [
       "src/index.ts"

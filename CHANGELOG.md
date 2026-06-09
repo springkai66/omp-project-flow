@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.0
+
+- Closed the local research workflow with structured questions, findings, decisions, risks, reviewed/draft source packs, and research handoff packets.
+- Added local file/range evidence extraction, source review, question answer, and decision commands for review-first research workflows.
+- Readiness now warns on open research questions, draft-only evidence, low-confidence evidence without a second source, stale sources, conflicts, and open research risks for upstream/parity tasks.
+
 ## 0.24.0
 
 - Added research source packs with source kind, reviewed source, claim, excerpt, confidence, related risks, and separate `research/source-packs.json` persistence.

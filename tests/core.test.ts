@@ -7,6 +7,9 @@ import {
   buildContextBundle,
   addTaskResearchNote,
   addTaskResearchSourcePack,
+  addTaskResearchQuestion,
+  answerTaskResearchQuestion,
+  addTaskResearchDecision,
   answerTaskClarification,
   applySpecProposal,
   applySubtaskPlan,
@@ -15,6 +18,7 @@ import {
   createChildTask,
   createTask,
   ensureProject,
+  extractTaskResearchSourcePack,
   finishActiveTask,
   getProjectPaths,
   isCodeWorkPrompt,
@@ -52,6 +56,7 @@ import {
   readSpecDocuments,
   resolveTask,
   resolveSpecProposal,
+  reviewTaskResearchSourcePack,
   saveTask,
   setActiveTask,
   setPlanStepStatus,
@@ -844,6 +849,75 @@ describe("project flow core", () => {
 
       const ready = await writeTaskReadiness(root, task, "test");
       expect(ready.warnings).not.toContain("No reviewed research source pack recorded for upstream/parity work.");
+    });
+  });
+
+  test("closes local research workflow with questions extraction review decisions and handoff", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      await mkdir(path.join(root, "docs"), { recursive: true });
+      await writeFile(path.join(root, "docs", "source.md"), ["# Source", "Research claim line", "Implementation detail line"].join("\n"), "utf8");
+      const task = await createTask(root, "implement ECC parity research workflow\n- Acceptance: local research workflow closes");
+      await updateAcceptanceItem(root, task.id, "A1", "done", "workflow covered");
+      for (const stepId of ["P1", "P2", "P3", "P4"]) {
+        await setPlanStepStatus(root, task.id, stepId, "done", "test complete");
+      }
+      await recordVerification(root, task.id, {
+        id: "check-1",
+        timestamp: "2026-06-09T00:00:00.000Z",
+        toolName: "bash",
+        command: "bun test tests/core.test.ts",
+        success: true,
+      });
+
+      const withQuestion = await addTaskResearchQuestion(root, task.id, "Which evidence supports this workflow?", { priority: "high" });
+      expect(withQuestion?.questions[0]?.status).toBe("open");
+
+      const extracted = await extractTaskResearchSourcePack(root, task.id, {
+        source: "docs/source.md:2-3",
+        claim: "Local source extraction can create draft evidence without pretending review.",
+        confidence: "low",
+        questionIds: ["Q1"],
+      });
+      expect(extracted?.sourcePacks[0]?.reviewStatus).toBe("draft");
+      expect(extracted?.sourcePacks[0]?.excerpt).toContain("2:Research claim line");
+
+      const warned = await writeTaskReadiness(root, task, "test");
+      expect(warned.warnings).toContain("No reviewed research source pack recorded for upstream/parity work.");
+      expect(warned.warnings).toContain("1 draft research source pack(s) still need review.");
+      expect(warned.warnings).toContain("Low-confidence research evidence has no second reviewed source.");
+      expect(warned.warnings.some(item => item.includes("research question"))).toBe(true);
+
+      await reviewTaskResearchSourcePack(root, task.id, "S1");
+      await addTaskResearchSourcePack(root, task.id, {
+        source: "docs/gaps.md:51-55",
+        claim: "Second reviewed source corroborates the local workflow requirement.",
+        excerpt: "Research artifacts require source packs and confidence review workflow.",
+        confidence: "high",
+        questionIds: ["Q1"],
+      });
+      await answerTaskResearchQuestion(root, task.id, "Q1", "Reviewed sources support the local workflow closure.", { sourcePackIds: ["S1", "S2"] });
+      await addTaskResearchDecision(root, task.id, "Use review-first local workflow", "It avoids hidden autonomous research while closing local state and handoff behavior.", { sourcePackIds: ["S1", "S2"], alternatives: ["hidden agent", "manual notes only"] });
+
+      const ready = await writeTaskReadiness(root, task, "test");
+      expect(ready.warnings).not.toContain("No reviewed research source pack recorded for upstream/parity work.");
+      expect(ready.warnings).not.toContain("1 draft research source pack(s) still need review.");
+      expect(ready.warnings).not.toContain("Low-confidence research evidence has no second reviewed source.");
+      expect(ready.warnings.some(item => item.includes("research question"))).toBe(false);
+
+      const research = await readTaskResearch(root, task.id);
+      expect(research?.questions[0]?.status).toBe("answered");
+      expect(research?.decisionRecords[0]?.decision).toBe("Use review-first local workflow");
+      expect(research?.sourcePacks.map(pack => pack.reviewStatus)).toEqual(["reviewed", "reviewed"]);
+
+      const handoff = await readFile(path.join(root, ".project-flow", "tasks", task.id, "research", "handoff.md"), "utf8");
+      expect(handoff).toContain("## Implementation Handoff");
+      expect(handoff).toContain("Use review-first local workflow");
+      expect(handoff).toContain("## Check Handoff");
+
+      const bundle = await buildContextBundle(root, "continue research workflow", task);
+      expect(bundle.content).toContain("questions:");
+      expect(bundle.content).toContain("reviewed sources");
     });
   });
 
