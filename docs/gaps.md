@@ -36,9 +36,9 @@ It also records implemented areas that are useful but still below the depth of T
   - Boundary: refinement stays explicit and reviewable; Project Flow asks and records focused questions, but it does not invent unresolved product decisions or proceed past collecting mode until required axes are answered or skipped.
 
 - Deeper subtask tree planning
-  - Status: partial.
-  - Current behavior: Project Flow supports parent/child task relationships, `/task:child`, `/task:tree`, readiness rollups, and subtask summaries.
-  - Target behavior: add multi-child split templates, better large-tree rollups, child ordering, and optional task tree planning from a single high-level goal.
+  - Status: implemented in 0.22.0.
+  - Current behavior: Project Flow supports parent/child task relationships, `/task:child`, `/task:tree`, readiness rollups, subtask summaries, multi-child split templates, ordered subtask plan items, nested parent plan-item links, and tree rollups by status, phase, depth, leaves, truncation, and blocked subtasks.
+  - Boundary: planning remains deterministic and local to `.project-flow/`; Project Flow records reviewable child-task proposals instead of inventing hidden agents or executing child tasks automatically unless `autoSubtaskMode`/`--mode auto` explicitly applies the plan.
 
 ## Implemented But Below Parity
 
@@ -80,9 +80,9 @@ It also records implemented areas that are useful but still below the depth of T
 
 - Verification suggestions and readiness blocking
   - Status: implemented, below ECC/OMO/Superpowers depth.
-  - Current behavior: Project Flow detects likely verification commands, records verification events, blocks finish when checks are missing or failing, and tracks opt-in remediation attempts with stop conditions and evidence.
-  - Gap: it does not classify flaky failures, compare check coverage to touched files, enforce a configurable verification matrix, or execute the self-fix loop automatically.
-  - Target behavior: add verification policies, coverage-aware check selection, failure classification, rerun attempt analysis, and safe self-fix loop integration.
+  - Current behavior: Project Flow detects likely verification commands, records verification events, blocks finish when checks are missing or failing, tracks opt-in remediation attempts with stop conditions and evidence, and now persists a verification policy matrix that compares touched-file categories with suggested checks and recorded pass evidence.
+  - Gap: it does not classify flaky failures, enforce a configurable user-defined verification matrix, or execute the self-fix loop automatically.
+  - Target behavior: add configurable verification policies, failure classification, rerun attempt analysis, and safe self-fix loop integration.
 
 - Upstream sync framework
   - Status: implemented as a local enhancement, below automated upstream-intelligence depth.

@@ -280,6 +280,42 @@ describe("project flow core", () => {
     });
   });
 
+  test("builds nested subtask plans with templates, ordering, and tree rollups", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, [
+        "implement nested workflow split",
+        "- Acceptance: research the target workflow",
+        "- Acceptance: implement the target workflow",
+        "- Acceptance: verify the target workflow",
+        "must keep parent task active",
+      ].join("\n"), { subtaskMode: "off" });
+
+      const plan = await writeSubtaskPlan(root, task, "suggest", "test_template", { template: "workflow", maxDepth: 2 });
+      expect(plan.template).toBe("workflow");
+      expect(plan.maxDepth).toBe(2);
+      expect(plan.items.map(item => item.order)).toEqual(plan.items.map((_, index) => index + 1));
+      expect(plan.items.some(item => item.depth === 2 && item.parentItemId)).toBe(true);
+      expect(plan.items.find(item => item.id === "S2")?.dependsOn).toContain("S1");
+      expect(formatSubtaskPlanSummary(plan)).toContain("template: workflow");
+
+      const result = await applySubtaskPlan(root, task.id);
+      expect(result.status).toBe("applied");
+      const applied = await readSubtaskPlan(root, task.id);
+      const nestedItem = applied?.items.find(item => item.depth === 2 && item.childTaskId);
+      expect(nestedItem?.parentItemId).toBeTruthy();
+      const parentItem = applied?.items.find(item => item.id === nestedItem?.parentItemId);
+      const nestedTask = nestedItem?.childTaskId ? await loadTask(root, nestedItem.childTaskId) : undefined;
+      expect(nestedTask?.metadata?.relationships.parentTaskId).toBe(parentItem?.childTaskId);
+
+      const tree = await buildSubtaskTree(root, task.id, 4);
+      expect(tree?.rollup.maxDepth).toBeGreaterThanOrEqual(2);
+      expect(tree?.rollup.byDepth["2"]).toBeGreaterThan(0);
+      expect(tree?.rollup.leafTasks).toBeGreaterThan(0);
+      expect(formatSubtaskTree(tree!)).toContain("## Rollup");
+    });
+  });
+
   test("auto subtask mode creates linked child tasks immediately", async () => {
     await withTempProject(async root => {
       await ensureProject(root);
@@ -712,6 +748,43 @@ describe("project flow core", () => {
 
       const refreshed = await refreshVerificationStrategy(root, task.id);
       expect(refreshed.suggestions[0]?.id).toBe("V1");
+    });
+  });
+
+  test("builds verification policy coverage from touched files and recorded checks", async () => {
+    await withTempProject(async root => {
+      await writeFile(
+        path.join(root, "package.json"),
+        `${JSON.stringify({ scripts: { test: "bun test", check: "bun --check src/index.ts" } }, null, 2)}\n`,
+        "utf8",
+      );
+      await ensureProject(root);
+      const task = await createTask(root, "implement verification coverage policy");
+      await recordToolEvent(root, "tool_end", {
+        toolName: "edit",
+        toolCallId: "edit-1",
+        args: { input: "[src/core.ts#0000]\nreplace 1..1:\n+export const changed = true;" },
+      });
+
+      const strategy = await refreshVerificationStrategy(root, task.id);
+      expect(strategy.policy.touchedFiles).toContain("src/core.ts");
+      expect(strategy.policy.matrix.some(item => item.category === "source" && item.command === "bun run check")).toBe(true);
+      expect(strategy.policy.coverageGaps.join("\n")).toContain("bun run check");
+
+      await recordVerification(root, task.id, {
+        id: "check-1",
+        timestamp: "2026-06-09T00:00:00.000Z",
+        toolName: "bash",
+        command: "bun run check",
+        success: true,
+      });
+
+      const covered = await readVerificationStrategy(root, task.id);
+      expect(covered.policy.matrix.find(item => item.category === "source")?.status).toBe("covered");
+      expect(covered.policy.coverageGaps).not.toContain("Run or record bun run check for source changes.");
+
+      const resume = await writeTaskResume(root, task, "test");
+      expect(resume.verificationCoverageGaps).not.toContain("Run or record bun run check for source changes.");
     });
   });
 

@@ -112,7 +112,7 @@ Commands are escape hatches and diagnostics:
 /task:metadata [id-prefix-or-title]
 /task:child <prompt>
 /task:tree [id-prefix-or-title]
-/task:subtasks [--refresh|--apply] [--mode off|suggest|auto] [id-prefix-or-title]
+/task:subtasks [--refresh|--apply] [--mode off|suggest|auto] [--template auto|acceptance|workflow|roles|verification] [--depth N] [id-prefix-or-title]
 /task:roles [--refresh|--start|--done|--block <research|implement|check>] [id-prefix-or-title] [note]
 /task:clarify [answer|--refine|--skip note|--finish [--force]]
 /task:finish [--force] [note]
@@ -151,7 +151,7 @@ Commands are escape hatches and diagnostics:
 
 Normal work does not require commands. The task commands are useful when you want to inspect, resume, or switch long-running work.
 
-Subtask planning policy is controlled by the `autoSubtaskMode` plugin setting: `off` disables automatic plans for new root tasks, `suggest` records guarded proposals for review, and `auto` creates linked child tasks from generated proposals. Project-local overrides can set `settings["omp-project-flow"].autoSubtaskMode` in `.omp/plugin-overrides.json` or `.pi/plugin-overrides.json`. `/task:subtasks --mode off|suggest|auto` can regenerate one task's plan with an explicit policy.
+Subtask planning policy is controlled by the `autoSubtaskMode` plugin setting: `off` disables automatic plans for new root tasks, `suggest` records guarded proposals for review, and `auto` creates linked child tasks from generated proposals. Project-local overrides can set `settings["omp-project-flow"].autoSubtaskMode` in `.omp/plugin-overrides.json` or `.pi/plugin-overrides.json`. `/task:subtasks --mode off|suggest|auto` can regenerate one task's plan with an explicit policy. `/task:subtasks --template acceptance|workflow|roles|verification --depth N` selects deterministic split templates with ordered items, dependencies, nested parent plan-item links, and tree rollups.
 
 Role orchestration handoffs are generated under each task's `roles/` directory. `/task:roles` shows the research/implement/check ownership plan, `/task:roles --refresh` regenerates prompts from current task state, and `/task:roles --start|--done|--block <role> [note]` records role progress while keeping the main OMP runtime in control.
 
@@ -225,7 +225,7 @@ Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId`
 
 Role orchestration records role prompts, owned artifacts, expected outputs, and role-local checks for research, implementation, and verification/review. It does not launch independent agents by itself; it provides explicit handoff packets and status tracking so a main OMP session or manually launched role agent can execute without guessing ownership.
 
-Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`. When checks fail, `/verify:remediate` creates an opt-in loop with failed check evidence, bounded attempts, stop conditions, and explicit pass/fail/stop status. It never runs fix or verification commands silently; the loop records what the agent/user chose to do and what evidence came back.
+Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`. Project Flow also writes a reviewable verification policy matrix into each `verification-strategy.json`: touched-file categories are matched to suggested checks, successful recorded commands mark rows covered, and readiness/resume packs surface remaining coverage gaps without running commands silently. When checks fail, `/verify:remediate` creates an opt-in loop with failed check evidence, bounded attempts, stop conditions, and explicit pass/fail/stop status. It never runs fix or verification commands silently; the loop records what the agent/user chose to do and what evidence came back.
 
 Spec proposals are saved for review under `.project-flow/spec-proposals/`. They are not applied to `.project-flow/spec/` unless you explicitly run `/spec:apply`.
 
@@ -255,6 +255,17 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.23.0
+
+- Added verification policy matrix coverage for touched files, suggested checks, and recorded pass evidence.
+- Readiness and resume packs now show verification coverage gaps as reviewable next actions.
+
+### 0.22.0
+
+- Added richer subtask planning templates: acceptance, workflow, roles, and verification.
+- Subtask plans now store item order, depth, dependencies, parent item links, template, and max depth.
+- Subtask trees now show rollups by status, phase, depth, leaves, truncation, and blocked subtasks.
 
 ### 0.21.0
 

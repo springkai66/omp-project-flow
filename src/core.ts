@@ -149,6 +149,7 @@ export interface ResumeState {
   touchedFiles: string[];
   openAcceptance: string[];
   failedChecks: string[];
+  verificationCoverageGaps: string[];
 }
 
 export type ReadinessStatus = "ready" | "warning" | "blocked";
@@ -294,6 +295,18 @@ export interface ProjectOverviewTask {
 export interface SubtaskTreeNode {
   task: TaskState;
   children: SubtaskTreeNode[];
+  depth: number;
+  truncatedChildCount?: number;
+}
+
+export interface SubtaskTreeRollup {
+  byStatus: Record<TaskStatus, number>;
+  byPhase: Record<TaskPhase, number>;
+  byDepth: Record<string, number>;
+  leafTasks: number;
+  maxDepth: number;
+  truncatedTasks: number;
+  blockedTasks: number;
 }
 
 export interface SubtaskTree {
@@ -302,10 +315,12 @@ export interface SubtaskTree {
   openTasks: number;
   finishedTasks: number;
   blockedTasks: string[];
+  rollup: SubtaskTreeRollup;
 }
 
 export type AutoSubtaskMode = "off" | "suggest" | "auto";
 export type SubtaskPlanItemStatus = "suggested" | "created" | "skipped";
+export type SubtaskPlanTemplate = "auto" | "acceptance" | "workflow" | "roles" | "verification";
 export type SubtaskComplexityLevel = "simple" | "moderate" | "complex";
 
 export interface SubtaskComplexity {
@@ -320,6 +335,11 @@ export interface SubtaskPlanItem {
   prompt: string;
   reason: string;
   status: SubtaskPlanItemStatus;
+  order: number;
+  depth: number;
+  template: SubtaskPlanTemplate;
+  dependsOn: string[];
+  parentItemId?: string;
   childTaskId?: string;
   createdAt?: string;
 }
@@ -327,6 +347,8 @@ export interface SubtaskPlanItem {
 export interface SubtaskPlan {
   taskId: string;
   mode: AutoSubtaskMode;
+  template: SubtaskPlanTemplate;
+  maxDepth: number;
   generatedAt: string;
   updatedAt: string;
   generatedFrom?: string;
@@ -467,10 +489,34 @@ export interface VerificationSuggestion {
   source: string;
 }
 
+export type VerificationPolicyCategory = "source" | "test" | "docs" | "config" | "package" | "workflow" | "other";
+export type VerificationPolicyStatus = "covered" | "missing" | "manual";
+
+export interface VerificationPolicyMatrixItem {
+  id: string;
+  category: VerificationPolicyCategory;
+  required: boolean;
+  command?: string;
+  reason: string;
+  source: string;
+  touchedFiles: string[];
+  satisfiedBy: string[];
+  status: VerificationPolicyStatus;
+}
+
+export interface VerificationPolicy {
+  updatedAt: string;
+  summary: string;
+  touchedFiles: string[];
+  matrix: VerificationPolicyMatrixItem[];
+  coverageGaps: string[];
+}
+
 export interface VerificationStrategy {
   suggestions: VerificationSuggestion[];
   updatedAt: string;
   sources: string[];
+  policy: VerificationPolicy;
 }
 
 export type VerificationRemediationStatus = "not_required" | "planned" | "active" | "resolved" | "stopped";
@@ -1735,6 +1781,7 @@ function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string
     remediation ? formatVerificationRemediationSummary(remediation) : "No verification remediation loop recorded yet.",
   );
 }
+
 function updateTaskInfoSection(content: string, title: string, body: string): string {
   const section = `## ${title}\n\n${body}\n`;
   const sectionPattern = new RegExp(`(^## ${escapeRegExp(title)}\\r?\\n\\r?\\n)([\\s\\S]*?)(?=\\r?\\n## |\\s*$)`, "m");
@@ -1766,6 +1813,7 @@ export async function readTaskResume(root: string, taskId: string): Promise<Resu
       touchedFiles: Array.isArray(parsed.touchedFiles) ? parsed.touchedFiles.filter(item => typeof item === "string") : [],
       openAcceptance: Array.isArray(parsed.openAcceptance) ? parsed.openAcceptance.filter(item => typeof item === "string") : [],
       failedChecks: Array.isArray(parsed.failedChecks) ? parsed.failedChecks.filter(item => typeof item === "string") : [],
+      verificationCoverageGaps: Array.isArray(parsed.verificationCoverageGaps) ? parsed.verificationCoverageGaps.filter(item => typeof item === "string") : [],
     };
   } catch {
     return undefined;
@@ -2194,14 +2242,16 @@ export async function writeSubtaskPlan(
   task: TaskState,
   mode: AutoSubtaskMode = "suggest",
   reason = "manual",
-  options: { prd?: ReturnType<typeof extractPrd> } = {},
+  options: { prd?: ReturnType<typeof extractPrd>; template?: SubtaskPlanTemplate; maxDepth?: number } = {},
 ): Promise<SubtaskPlan> {
   const currentTask = await loadTask(root, task.id) || task;
   const existing = await readSubtaskPlan(root, currentTask.id);
   const prd = options.prd || extractPrd(currentTask.initialPrompt);
   const now = new Date().toISOString();
   const complexity = scoreSubtaskComplexity(currentTask, prd);
-  const suggestions = mode === "off" ? [] : buildSubtaskPlanItems(currentTask, prd, now, complexity);
+  const template = resolveSubtaskPlanTemplate(currentTask, prd, complexity, options.template);
+  const maxDepth = clampSubtaskPlanDepth(options.maxDepth);
+  const suggestions = mode === "off" ? [] : buildSubtaskPlanItems(currentTask, prd, now, complexity, template, maxDepth);
   const existingByPrompt = new Map((existing?.items || []).map(item => [normalizeSubtaskPromptKey(item.prompt), item]));
   const items = suggestions.map(item => {
     const previous = existingByPrompt.get(normalizeSubtaskPromptKey(item.prompt));
@@ -2212,6 +2262,8 @@ export async function writeSubtaskPlan(
   const plan = normalizeSubtaskPlan({
     taskId: currentTask.id,
     mode,
+    template,
+    maxDepth,
     generatedAt: existing?.generatedAt || now,
     updatedAt: now,
     generatedFrom: reason,
@@ -2221,6 +2273,8 @@ export async function writeSubtaskPlan(
   }) || {
     taskId: currentTask.id,
     mode,
+    template,
+    maxDepth,
     generatedAt: now,
     updatedAt: now,
     generatedFrom: reason,
@@ -2232,7 +2286,7 @@ export async function writeSubtaskPlan(
   await appendTaskEvent(root, currentTask.id, {
     type: "subtask_plan_updated",
     timestamp: now,
-    data: { mode, reason, suggestions: plan.items.length, complexity: plan.complexity },
+    data: { mode, reason, template: plan.template, maxDepth: plan.maxDepth, suggestions: plan.items.length, complexity: plan.complexity },
   });
   return plan;
 }
@@ -2252,17 +2306,23 @@ export async function applySubtaskPlan(root: string, taskId: string): Promise<Su
   if (!task) return { status: "missing", created: [] };
   let plan = await readSubtaskPlan(root, task.id);
   if (!plan) plan = await writeSubtaskPlan(root, task, "suggest", "apply_missing");
-  const pending = plan.items.filter(item => item.status === "suggested");
+  const pending = plan.items
+    .filter(item => item.status === "suggested")
+    .sort(compareSubtaskPlanItems);
   if (plan.mode === "off") return { status: "empty", task, plan, created: [] };
   if (pending.length === 0) return { status: "empty", task, plan, created: [] };
 
   const created: TaskState[] = [];
   const now = new Date().toISOString();
   const nextItems = [...plan.items];
-  for (const item of pending.slice(0, 8)) {
-    const child = await createChildTask(root, task.id, item.prompt);
+  const taskIdByPlanItemId = new Map(plan.items.filter(item => item.childTaskId).map(item => [item.id, item.childTaskId as string]));
+  for (const item of pending.slice(0, 16)) {
+    const parentTaskId = item.parentItemId ? taskIdByPlanItemId.get(item.parentItemId) : task.id;
+    if (!parentTaskId) continue;
+    const child = await createChildTask(root, parentTaskId, item.prompt);
     if (!child) continue;
     created.push(child);
+    taskIdByPlanItemId.set(item.id, child.id);
     const index = nextItems.findIndex(candidate => candidate.id === item.id);
     if (index >= 0) {
       nextItems[index] = { ...nextItems[index], status: "created", childTaskId: child.id, createdAt: now };
@@ -2341,7 +2401,7 @@ async function wouldCreateTaskCycle(root: string, parentTaskId: string, childTas
 export async function buildSubtaskTree(root: string, taskId: string, maxDepth = 4): Promise<SubtaskTree | undefined> {
   const task = await loadTask(root, taskId);
   if (!task) return undefined;
-  const rootNode = await buildSubtaskTreeNode(root, task, new Set(), maxDepth);
+  const rootNode = await buildSubtaskTreeNode(root, task, new Set(), maxDepth, 0);
   const nodes = flattenSubtaskTree(rootNode);
   const blockedTasks: string[] = [];
   for (const node of nodes) {
@@ -2349,12 +2409,14 @@ export async function buildSubtaskTree(root: string, taskId: string, maxDepth = 
     const readiness = await writeTaskReadiness(root, node.task, "subtask_tree");
     if (readiness.status === "blocked") blockedTasks.push(`${node.task.id}: ${readiness.summary}`);
   }
+  const rollup = buildSubtaskTreeRollup(nodes, blockedTasks.length);
   return {
     root: rootNode,
     totalTasks: nodes.length,
     openTasks: nodes.filter(node => node.task.status !== "finished").length,
     finishedTasks: nodes.filter(node => node.task.status === "finished").length,
     blockedTasks,
+    rollup,
   };
 }
 
@@ -2362,22 +2424,43 @@ async function buildSubtaskTreeNode(
   root: string,
   task: TaskState,
   seen: Set<string>,
-  depth: number,
+  remainingDepth: number,
+  currentDepth: number,
 ): Promise<SubtaskTreeNode> {
-  if (seen.has(task.id) || depth <= 0) return { task, children: [] };
-  seen.add(task.id);
   const childIds = task.metadata?.relationships.childTaskIds || [];
+  if (seen.has(task.id) || remainingDepth <= 0) {
+    return { task, children: [], depth: currentDepth, truncatedChildCount: childIds.length || undefined };
+  }
+  seen.add(task.id);
   const children: SubtaskTreeNode[] = [];
   for (const childId of childIds.slice(0, 20)) {
     const child = await loadTask(root, childId);
     if (!child) continue;
-    children.push(await buildSubtaskTreeNode(root, child, new Set(seen), depth - 1));
+    children.push(await buildSubtaskTreeNode(root, child, new Set(seen), remainingDepth - 1, currentDepth + 1));
   }
-  return { task, children };
+  return { task, children, depth: currentDepth, truncatedChildCount: childIds.length > 20 ? childIds.length - 20 : undefined };
 }
 
 function flattenSubtaskTree(node: SubtaskTreeNode): SubtaskTreeNode[] {
   return [node, ...node.children.flatMap(flattenSubtaskTree)];
+}
+
+function buildSubtaskTreeRollup(nodes: SubtaskTreeNode[], blockedTasks: number): SubtaskTreeRollup {
+  const byStatus: Record<TaskStatus, number> = { active: 0, paused: 0, finished: 0 };
+  const byPhase: Record<TaskPhase, number> = { intake: 0, planning: 0, implementing: 0, verifying: 0, finished: 0 };
+  const byDepth: Record<string, number> = {};
+  let leafTasks = 0;
+  let maxDepth = 0;
+  let truncatedTasks = 0;
+  for (const node of nodes) {
+    byStatus[node.task.status] += 1;
+    byPhase[node.task.phase] += 1;
+    byDepth[String(node.depth)] = (byDepth[String(node.depth)] || 0) + 1;
+    if (node.children.length === 0) leafTasks += 1;
+    if (node.depth > maxDepth) maxDepth = node.depth;
+    truncatedTasks += node.truncatedChildCount || 0;
+  }
+  return { byStatus, byPhase, byDepth, leafTasks, maxDepth, truncatedTasks, blockedTasks };
 }
 
 export function formatSubtaskPlan(plan: SubtaskPlan): string {
@@ -2386,6 +2469,8 @@ export function formatSubtaskPlan(plan: SubtaskPlan): string {
     "",
     `Task: ${plan.taskId}`,
     `Mode: ${plan.mode}`,
+    `Template: ${plan.template}`,
+    `Max depth: ${plan.maxDepth}`,
     `Updated: ${plan.updatedAt}`,
     plan.generatedFrom ? `Reason: ${plan.generatedFrom}` : undefined,
     "",
@@ -2399,7 +2484,7 @@ export function formatSubtaskPlan(plan: SubtaskPlan): string {
     "",
     "## Suggestions",
     "",
-    plan.items.length === 0 ? "No subtask suggestions generated." : plan.items.map(formatSubtaskPlanItem).join("\n"),
+    plan.items.length === 0 ? "No subtask suggestions generated." : plan.items.slice().sort(compareSubtaskPlanItems).map(formatSubtaskPlanItem).join("\n"),
     "",
   ].filter((line): line is string => line !== undefined).join("\n");
 }
@@ -2409,8 +2494,9 @@ export function formatSubtaskPlanSummary(plan: SubtaskPlan, max = 8): string {
   return [
     `subtask plan: ${plan.items.length} item(s), ${counts.suggested} suggested, ${counts.created} created, ${counts.skipped} skipped`,
     `mode: ${plan.mode}`,
+    `template: ${plan.template}, max depth: ${plan.maxDepth}`,
     `complexity: ${plan.complexity.level} (${plan.complexity.score})${plan.complexity.reasons.length > 0 ? ` - ${plan.complexity.reasons.slice(0, 3).join("; ")}` : ""}`,
-    plan.items.length > 0 ? ["suggestions:", ...plan.items.slice(0, max).map(item => `- ${item.id} [${item.status}] ${item.title}${item.childTaskId ? ` -> ${item.childTaskId}` : ""}`)].join("\n") : "suggestions: none",
+    plan.items.length > 0 ? ["suggestions:", ...plan.items.slice().sort(compareSubtaskPlanItems).slice(0, max).map(item => `- ${item.id} [${item.status}] #${item.order} d${item.depth} ${item.title}${item.parentItemId ? ` < ${item.parentItemId}` : ""}${item.childTaskId ? ` -> ${item.childTaskId}` : ""}`)].join("\n") : "suggestions: none",
   ].join("\n");
 }
 
@@ -2424,7 +2510,10 @@ function formatSubtaskComplexity(complexity: SubtaskComplexity): string {
 
 function formatSubtaskPlanItem(item: SubtaskPlanItem): string {
   return [
-    `- ${item.id} [${item.status}] ${item.title}`,
+    `- ${item.id} [${item.status}] #${item.order} d${item.depth} ${item.title}`,
+    `  - template: ${item.template}`,
+    item.parentItemId ? `  - parent item: ${item.parentItemId}` : undefined,
+    item.dependsOn.length > 0 ? `  - depends on: ${item.dependsOn.join(", ")}` : undefined,
     `  - reason: ${item.reason}`,
     `  - prompt: ${item.prompt.replace(/\r?\n/g, " ")}`,
     item.childTaskId ? `  - child task: ${item.childTaskId}` : undefined,
@@ -2439,6 +2528,13 @@ export function formatSubtaskTree(tree: SubtaskTree, maxDepth = 4): string {
     `Total tasks: ${tree.totalTasks}`,
     `Open tasks: ${tree.openTasks}`,
     `Finished tasks: ${tree.finishedTasks}`,
+    `Max depth: ${tree.rollup.maxDepth}`,
+    `Leaf tasks: ${tree.rollup.leafTasks}`,
+    tree.rollup.truncatedTasks > 0 ? `Truncated child refs: ${tree.rollup.truncatedTasks}` : undefined,
+    "",
+    "## Rollup",
+    "",
+    formatSubtaskTreeRollup(tree.rollup),
     "",
     "## Tree",
     "",
@@ -2448,12 +2544,22 @@ export function formatSubtaskTree(tree: SubtaskTree, maxDepth = 4): string {
     "",
     formatResumeList(tree.blockedTasks.slice(0, 12), "No blocked subtasks recorded."),
     "",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatSubtaskTreeRollup(rollup: SubtaskTreeRollup): string {
+  return [
+    `Status: ${rollup.byStatus.active} active, ${rollup.byStatus.paused} paused, ${rollup.byStatus.finished} finished`,
+    `Phase: ${rollup.byPhase.intake} intake, ${rollup.byPhase.planning} planning, ${rollup.byPhase.implementing} implementing, ${rollup.byPhase.verifying} verifying, ${rollup.byPhase.finished} finished`,
+    `Depth: ${Object.entries(rollup.byDepth).map(([depth, count]) => `${depth}:${count}`).join(", ") || "none"}`,
+    `Blocked: ${rollup.blockedTasks}`,
   ].join("\n");
 }
 
 function formatSubtaskTreeNode(node: SubtaskTreeNode, depth: number, maxDepth: number): string {
   const indent = "  ".repeat(depth);
-  const line = `${indent}- ${node.task.id} [${node.task.status}/${node.task.phase}] ${node.task.title}`;
+  const truncated = node.truncatedChildCount ? ` (+${node.truncatedChildCount} truncated)` : "";
+  const line = `${indent}- ${node.task.id} [${node.task.status}/${node.task.phase}] ${node.task.title}${truncated}`;
   if (depth >= maxDepth || node.children.length === 0) return line;
   return [line, ...node.children.map(child => formatSubtaskTreeNode(child, depth + 1, maxDepth))].join("\n");
 }
@@ -2466,8 +2572,11 @@ export async function formatSubtaskTreeSummary(root: string, task: TaskState, ma
     `subtasks: ${nodes.length}`,
     `open: ${tree.openTasks - (tree.root.task.status !== "finished" ? 1 : 0)}`,
     `finished: ${tree.finishedTasks - (tree.root.task.status === "finished" ? 1 : 0)}`,
-    nodes.length > 0 ? ["recent subtasks:", ...nodes.slice(0, max).map(node => `- ${node.task.id} [${node.task.status}/${node.task.phase}] ${node.task.title}`)].join("\n") : "recent subtasks: none",
-  ].join("\n");
+    `max depth: ${tree.rollup.maxDepth}`,
+    tree.rollup.blockedTasks > 0 ? `blocked: ${tree.rollup.blockedTasks}` : undefined,
+    tree.rollup.truncatedTasks > 0 ? `truncated refs: ${tree.rollup.truncatedTasks}` : undefined,
+    nodes.length > 0 ? ["recent subtasks:", ...nodes.slice(0, max).map(node => `- ${node.task.id} [${node.task.status}/${node.task.phase}] d${node.depth} ${node.task.title}`)].join("\n") : "recent subtasks: none",
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 function normalizeSubtaskPlan(value: Partial<SubtaskPlan> | undefined): SubtaskPlan | undefined {
@@ -2475,12 +2584,17 @@ function normalizeSubtaskPlan(value: Partial<SubtaskPlan> | undefined): SubtaskP
     return undefined;
   }
   const mode = isAutoSubtaskMode(value.mode) ? value.mode : "suggest";
-  const items = Array.isArray(value.items)
-    ? value.items.map(normalizeSubtaskPlanItem).filter((item): item is SubtaskPlanItem => !!item).slice(0, 12)
+  const rawItems = Array.isArray(value.items)
+    ? value.items.map(normalizeSubtaskPlanItem).filter((item): item is SubtaskPlanItem => !!item).slice(0, 20)
     : [];
+  const items = rawItems.map((item, index) => ({ ...item, order: item.order > 0 ? item.order : index + 1 })).sort(compareSubtaskPlanItems);
+  const template = normalizeSubtaskPlanTemplate(value.template) || items[0]?.template || "auto";
+  const maxDepth = clampSubtaskPlanDepth(value.maxDepth ?? Math.max(1, ...items.map(item => item.depth || 1)));
   return {
     taskId: value.taskId,
     mode,
+    template,
+    maxDepth,
     generatedAt: value.generatedAt,
     updatedAt: value.updatedAt,
     generatedFrom: typeof value.generatedFrom === "string" ? value.generatedFrom : undefined,
@@ -2500,6 +2614,11 @@ function normalizeSubtaskPlanItem(value: unknown): SubtaskPlanItem | undefined {
     prompt: record.prompt.trim(),
     reason: typeof record.reason === "string" && record.reason.trim() ? record.reason.trim() : "Suggested from the parent task.",
     status: isSubtaskPlanItemStatus(record.status) ? record.status : "suggested",
+    order: typeof record.order === "number" && Number.isFinite(record.order) ? Math.max(0, Math.round(record.order)) : 0,
+    depth: typeof record.depth === "number" && Number.isFinite(record.depth) ? Math.max(1, Math.min(3, Math.round(record.depth))) : 1,
+    template: normalizeSubtaskPlanTemplate(record.template) || "auto",
+    dependsOn: stringArray(record.dependsOn),
+    parentItemId: typeof record.parentItemId === "string" && record.parentItemId.trim() ? record.parentItemId.trim() : undefined,
     childTaskId: typeof record.childTaskId === "string" && record.childTaskId.trim() ? record.childTaskId.trim() : undefined,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : undefined,
   };
@@ -2526,18 +2645,49 @@ function normalizeSubtaskComplexity(value: unknown, items: SubtaskPlanItem[]): S
   };
 }
 
+interface SubtaskPlanCandidate {
+  key: string;
+  title: string;
+  prompt: string;
+  reason: string;
+  template: SubtaskPlanTemplate;
+  depth: number;
+  parentKey?: string;
+  dependsOnKeys?: string[];
+}
 
-function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPrd>, now: string, complexity: SubtaskComplexity): SubtaskPlanItem[] {
-  const candidates: Array<{ title: string; prompt: string; reason: string }> = [];
+function buildSubtaskPlanItems(
+  task: TaskState,
+  prd: ReturnType<typeof extractPrd>,
+  now: string,
+  complexity: SubtaskComplexity,
+  template: SubtaskPlanTemplate,
+  maxDepth: number,
+): SubtaskPlanItem[] {
   const goal = prd.goal || task.title;
-  const acceptance = prd.acceptanceCriteria.filter(item => item.trim()).slice(0, 6);
+  const acceptance = prd.acceptanceCriteria.filter(item => item.trim()).slice(0, 8);
   const constraints = prd.constraints.filter(item => item !== "Keep changes scoped to the requested workflow.").slice(0, 4);
   const openQuestions = prd.openQuestions.filter(isMeaningfulOpenQuestion).slice(0, 3);
-  const explicitAcceptanceCount = countExplicitAcceptanceCriteria(task.initialPrompt);
   if (complexity.level === "simple") return [];
 
-  if (shouldSuggestResearchSubtask(task, prd, complexity)) {
+  const candidates: SubtaskPlanCandidate[] = [];
+  if (template === "workflow") {
+    addWorkflowSubtaskCandidates(candidates, goal, acceptance, constraints, openQuestions, maxDepth);
+  } else if (template === "roles") {
+    addRoleSubtaskCandidates(candidates, goal, acceptance, constraints, maxDepth);
+  } else if (template === "verification") {
+    addVerificationSubtaskCandidates(candidates, goal, acceptance, constraints);
+  } else {
+    addAcceptanceSubtaskCandidates(candidates, goal, acceptance, constraints, openQuestions, complexity);
+  }
+
+  return finalizeSubtaskCandidates(candidates, now);
+}
+
+function addAcceptanceSubtaskCandidates(candidates: SubtaskPlanCandidate[], goal: string, acceptance: string[], constraints: string[], openQuestions: string[], complexity: SubtaskComplexity): void {
+  if (complexity.level === "complex" || openQuestions.length > 0) {
     candidates.push({
+      key: "research",
       title: `Research ${shortTaskTitle(goal)}`,
       prompt: formatSuggestedSubtaskPrompt("Research", goal, [
         "Inspect relevant code, specs, and upstream notes.",
@@ -2545,11 +2695,13 @@ function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPr
         "Identify implementation boundaries before code changes.",
       ], constraints),
       reason: "Complex or uncertain task benefits from a separate research pass.",
+      template: "acceptance",
+      depth: 1,
     });
   }
-
-  for (const criterion of acceptance.slice(0, 4)) {
+  acceptance.slice(0, 6).forEach((criterion, index) => {
     candidates.push({
+      key: `acceptance-${index + 1}`,
       title: shortTaskTitle(criterion),
       prompt: formatSuggestedSubtaskPrompt("Implement", criterion, [
         criterion,
@@ -2557,22 +2709,27 @@ function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPr
         "Update plan, acceptance, and handoff artifacts as work progresses.",
       ], constraints),
       reason: "Acceptance criterion can be tracked as an independently finishable child task.",
+      template: "acceptance",
+      depth: 1,
+      dependsOnKeys: candidates.some(candidate => candidate.key === "research") ? ["research"] : [],
     });
-  }
-
+  });
   if (openQuestions.length > 0) {
     candidates.push({
-      title: `Clarify ${shortTaskTitle(openQuestions[0])}`,
+      key: "clarify",
+      title: `Clarify ${shortTaskTitle(openQuestions[0] || goal)}`,
       prompt: formatSuggestedSubtaskPrompt("Clarify", goal, [
         ...openQuestions.map(question => `Resolve open question: ${question}`),
         "Update PRD and acceptance criteria with the answer.",
       ], constraints),
       reason: "Open questions should be settled before deeper implementation.",
+      template: "acceptance",
+      depth: 1,
     });
   }
-
-  if (explicitAcceptanceCount >= 2 || complexity.level === "complex") {
+  if (acceptance.length >= 2 || complexity.level === "complex") {
     candidates.push({
+      key: "verify",
       title: `Verify ${shortTaskTitle(goal)}`,
       prompt: formatSuggestedSubtaskPrompt("Verify", goal, [
         "Run or document targeted lint, typecheck, and test commands.",
@@ -2580,17 +2737,178 @@ function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPr
         "Confirm child tasks satisfy parent acceptance criteria.",
       ], constraints),
       reason: "Complex task should have a distinct verification pass.",
+      template: "verification",
+      depth: 1,
+      dependsOnKeys: acceptance.map((_, index) => `acceptance-${index + 1}`),
     });
   }
+}
 
-  return dedupeSubtaskCandidates(candidates).slice(0, 6).map((candidate, index) => ({
+function addWorkflowSubtaskCandidates(candidates: SubtaskPlanCandidate[], goal: string, acceptance: string[], constraints: string[], openQuestions: string[], maxDepth: number): void {
+  candidates.push({
+    key: "research",
+    title: `Research ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Research", goal, ["Inspect context and resolve implementation boundaries."], constraints),
+    reason: "Workflow template starts with a separate context pass.",
+    template: "workflow",
+    depth: 1,
+  });
+  candidates.push({
+    key: "implement",
+    title: `Implement ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Implement", goal, ["Apply the core changes after research is complete."], constraints),
+    reason: "Workflow template keeps implementation work explicit.",
+    template: "workflow",
+    depth: 1,
+    dependsOnKeys: ["research"],
+  });
+  acceptance.slice(0, 6).forEach((criterion, index) => {
+    candidates.push({
+      key: `acceptance-${index + 1}`,
+      title: shortTaskTitle(criterion),
+      prompt: formatSuggestedSubtaskPrompt("Implement acceptance", criterion, [criterion], constraints),
+      reason: "Acceptance detail belongs under the implementation branch.",
+      template: "workflow",
+      depth: maxDepth > 1 ? 2 : 1,
+      parentKey: maxDepth > 1 ? "implement" : undefined,
+      dependsOnKeys: ["research"],
+    });
+  });
+  if (openQuestions.length > 0) {
+    candidates.push({
+      key: "clarify",
+      title: `Clarify ${shortTaskTitle(openQuestions[0] || goal)}`,
+      prompt: formatSuggestedSubtaskPrompt("Clarify", goal, openQuestions.map(question => `Resolve open question: ${question}`), constraints),
+      reason: "Workflow template keeps unresolved questions visible before verification.",
+      template: "workflow",
+      depth: 1,
+      dependsOnKeys: ["research"],
+    });
+  }
+  candidates.push({
+    key: "verify",
+    title: `Verify ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Verify", goal, ["Run targeted checks and record evidence."], constraints),
+    reason: "Workflow template ends with an explicit verification branch.",
+    template: "verification",
+    depth: 1,
+    dependsOnKeys: ["implement", ...acceptance.map((_, index) => `acceptance-${index + 1}`)],
+  });
+}
+
+function addRoleSubtaskCandidates(candidates: SubtaskPlanCandidate[], goal: string, acceptance: string[], constraints: string[], maxDepth: number): void {
+  candidates.push({
+    key: "research-role",
+    title: `Research ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Research", goal, ["Gather source context, risks, and decisions."], constraints),
+    reason: "Role template mirrors research ownership from orchestration patterns.",
+    template: "roles",
+    depth: 1,
+  });
+  candidates.push({
+    key: "implement-role",
+    title: `Implement ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Implement", goal, acceptance.length > 0 ? acceptance.slice(0, 4) : ["Deliver the requested behavior."], constraints),
+    reason: "Role template separates implementation ownership.",
+    template: "roles",
+    depth: 1,
+    dependsOnKeys: ["research-role"],
+  });
+  if (maxDepth > 1) {
+    acceptance.slice(0, 4).forEach((criterion, index) => {
+      candidates.push({
+        key: `role-acceptance-${index + 1}`,
+        title: shortTaskTitle(criterion),
+        prompt: formatSuggestedSubtaskPrompt("Implement acceptance", criterion, [criterion], constraints),
+        reason: "Acceptance item is nested below the implementation role.",
+        template: "roles",
+        depth: 2,
+        parentKey: "implement-role",
+        dependsOnKeys: ["research-role"],
+      });
+    });
+  }
+  candidates.push({
+    key: "check-role",
+    title: `Check ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Check", goal, ["Verify behavior and record finish evidence."], constraints),
+    reason: "Role template keeps check ownership separate from implementation.",
+    template: "roles",
+    depth: 1,
+    dependsOnKeys: ["implement-role"],
+  });
+}
+
+function addVerificationSubtaskCandidates(candidates: SubtaskPlanCandidate[], goal: string, acceptance: string[], constraints: string[]): void {
+  candidates.push({
+    key: "verify-plan",
+    title: `Plan verification for ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Plan verification", goal, ["Identify the smallest commands or scenarios that prove the change."], constraints),
+    reason: "Verification template starts by selecting evidence, not running everything blindly.",
+    template: "verification",
+    depth: 1,
+  });
+  candidates.push({
+    key: "verify-run",
+    title: `Run verification for ${shortTaskTitle(goal)}`,
+    prompt: formatSuggestedSubtaskPrompt("Run verification", goal, acceptance.length > 0 ? acceptance.slice(0, 4) : ["Run targeted checks and record results."], constraints),
+    reason: "Verification template records executable proof as a child task.",
+    template: "verification",
+    depth: 1,
+    dependsOnKeys: ["verify-plan"],
+  });
+}
+
+function finalizeSubtaskCandidates(candidates: SubtaskPlanCandidate[], now: string): SubtaskPlanItem[] {
+  const seen = new Set<string>();
+  const deduped: SubtaskPlanCandidate[] = [];
+  for (const candidate of candidates) {
+    const key = normalizeSubtaskPromptKey(candidate.prompt);
+    if (seen.has(candidate.key) || seen.has(key)) continue;
+    seen.add(candidate.key);
+    seen.add(key);
+    deduped.push(candidate);
+  }
+  const idByKey = new Map(deduped.map((candidate, index) => [candidate.key, `S${index + 1}`]));
+  return deduped.slice(0, 16).map((candidate, index) => ({
     id: `S${index + 1}`,
     title: candidate.title,
     prompt: candidate.prompt,
     reason: candidate.reason,
-    status: "suggested",
+    status: "suggested" as const,
+    order: index + 1,
+    depth: candidate.depth,
+    template: candidate.template,
+    dependsOn: (candidate.dependsOnKeys || []).map(key => idByKey.get(key)).filter((id): id is string => !!id),
+    parentItemId: candidate.parentKey ? idByKey.get(candidate.parentKey) : undefined,
     createdAt: now,
   }));
+}
+
+function compareSubtaskPlanItems(a: SubtaskPlanItem, b: SubtaskPlanItem): number {
+  return a.order - b.order || a.depth - b.depth || a.id.localeCompare(b.id);
+}
+
+function resolveSubtaskPlanTemplate(task: TaskState, prd: ReturnType<typeof extractPrd>, complexity: SubtaskComplexity, value?: SubtaskPlanTemplate): SubtaskPlanTemplate {
+  const requested = normalizeSubtaskPlanTemplate(value);
+  return requested && requested !== "auto" ? requested : inferSubtaskPlanTemplate(task, prd, complexity);
+}
+
+function inferSubtaskPlanTemplate(task: TaskState, prd: ReturnType<typeof extractPrd>, complexity: SubtaskComplexity): SubtaskPlanTemplate {
+  const prompt = task.initialPrompt;
+  if (/(role|agent|subagent|handoff|orchestration|team|角色|智能体|编排|交接)/i.test(prompt)) return "roles";
+  if (/(verify|test|lint|typecheck|validation|remediation|验证|测试|检查|修复)/i.test(prompt) && prd.acceptanceCriteria.length <= 2) return "verification";
+  if (complexity.level === "complex" || prd.acceptanceCriteria.length >= 3) return "workflow";
+  return "acceptance";
+}
+
+function normalizeSubtaskPlanTemplate(value: unknown): SubtaskPlanTemplate | undefined {
+  return value === "auto" || value === "acceptance" || value === "workflow" || value === "roles" || value === "verification" ? value : undefined;
+}
+
+function clampSubtaskPlanDepth(value: unknown): number {
+  const numeric = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : 2;
+  return Math.max(1, Math.min(3, numeric));
 }
 
 function scoreSubtaskComplexity(task: TaskState, prd: ReturnType<typeof extractPrd>): SubtaskComplexity {
@@ -2669,12 +2987,6 @@ function scoreSubtaskComplexity(task: TaskState, prd: ReturnType<typeof extractP
   };
 }
 
-function shouldSuggestResearchSubtask(task: TaskState, prd: ReturnType<typeof extractPrd>, complexity: SubtaskComplexity): boolean {
-  return complexity.level === "complex" ||
-    prd.openQuestions.some(isMeaningfulOpenQuestion) ||
-    /(research|investigate|architecture|design|upstream|迁移|兼容|调研|研究|架构|设计|上游)/i.test(task.initialPrompt);
-}
-
 function countExplicitAcceptanceCriteria(prompt: string): number {
   return prompt
     .split(/\r?\n/)
@@ -2689,18 +3001,6 @@ function formatSuggestedSubtaskPrompt(kind: string, goal: string, acceptance: st
     ...constraints.map(item => `- Constraint: ${item}`),
     ...acceptance.map(item => `- Acceptance: ${item}`),
   ].join("\n");
-}
-
-function dedupeSubtaskCandidates(candidates: Array<{ title: string; prompt: string; reason: string }>): Array<{ title: string; prompt: string; reason: string }> {
-  const seen = new Set<string>();
-  const result: Array<{ title: string; prompt: string; reason: string }> = [];
-  for (const candidate of candidates) {
-    const key = normalizeSubtaskPromptKey(candidate.prompt);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(candidate);
-  }
-  return result;
 }
 
 function normalizeSubtaskPromptKey(prompt: string): string {
@@ -3196,6 +3496,7 @@ export async function recordVerification(root: string, taskId: string, check: Ve
   state.updatedAt = check.timestamp;
   await writeFile(path.join(taskDir, "verification.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
   await appendTaskEvent(root, taskId, { type: "verification_recorded", timestamp: check.timestamp, data: check });
+  await refreshVerificationStrategy(root, taskId);
   return state;
 }
 
@@ -3204,10 +3505,15 @@ export async function readVerificationStrategy(root: string, taskId: string): Pr
   if (!(await pathExists(strategyPath))) return refreshVerificationStrategy(root, taskId);
   try {
     const parsed = JSON.parse(await readFile(strategyPath, "utf8")) as Partial<VerificationStrategy>;
+    const suggestions = Array.isArray(parsed.suggestions) ? parsed.suggestions.filter(isVerificationSuggestion) : [];
+    const updatedAt = typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString();
+    const [events, verification] = await Promise.all([readTaskEvents(root, taskId), readVerification(root, taskId)]);
+    const touchedFiles = collectTouchedFiles(root, events);
     return {
-      suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions.filter(isVerificationSuggestion) : [],
-      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : new Date().toISOString(),
+      suggestions,
+      updatedAt,
       sources: Array.isArray(parsed.sources) ? parsed.sources.filter(item => typeof item === "string") : [],
+      policy: normalizeVerificationPolicy(parsed.policy, touchedFiles, suggestions, updatedAt, verification.checks),
     };
   } catch {
     return refreshVerificationStrategy(root, taskId);
@@ -3496,7 +3802,13 @@ function isVerificationRemediationAttemptStatus(value: unknown): value is Verifi
 
 
 export async function refreshVerificationStrategy(root: string, taskId: string): Promise<VerificationStrategy> {
-  const strategy = await detectVerificationStrategy(root);
+  const detected = await detectVerificationStrategy(root);
+  const events = await readTaskEvents(root, taskId);
+  const verification = await readVerification(root, taskId);
+  const strategy = {
+    ...detected,
+    policy: buildVerificationPolicy(collectTouchedFiles(root, events), detected.suggestions, verification.checks, detected.updatedAt),
+  };
   const taskDir = path.join(getProjectPaths(root).tasksDir, taskId);
   await mkdir(taskDir, { recursive: true });
   await writeFile(path.join(taskDir, "verification-strategy.json"), `${JSON.stringify(strategy, null, 2)}\n`, "utf8");
@@ -3519,20 +3831,186 @@ export async function detectVerificationStrategy(root: string): Promise<Verifica
   await addDotnetSuggestions(root, suggestions, sources);
   await addMakeSuggestions(root, suggestions, sources);
 
+  const updatedAt = new Date().toISOString();
+  const deduped = dedupeSuggestions(suggestions).map((suggestion, index) => ({ ...suggestion, id: `V${index + 1}` }));
   return {
-    suggestions: dedupeSuggestions(suggestions).map((suggestion, index) => ({ ...suggestion, id: `V${index + 1}` })),
-    updatedAt: new Date().toISOString(),
+    suggestions: deduped,
+    updatedAt,
     sources,
+    policy: buildVerificationPolicy([], deduped, [], updatedAt),
   };
 }
 
 export function formatVerificationSuggestions(strategy: VerificationStrategy, max = 8): string {
-  if (strategy.suggestions.length === 0) return "No verification commands suggested yet.";
-  const lines = strategy.suggestions.slice(0, max).map(item =>
-    `- ${item.id}: ${item.command} (${item.confidence}, ${item.reason}; ${item.source})`,
-  );
+  const lines = strategy.suggestions.length === 0
+    ? ["No verification commands suggested yet."]
+    : strategy.suggestions.slice(0, max).map(item =>
+      `- ${item.id}: ${item.command} (${item.confidence}, ${item.reason}; ${item.source})`,
+    );
   if (strategy.suggestions.length > max) lines.push(`...and ${strategy.suggestions.length - max} more`);
+  lines.push("", "Verification policy:", ...formatVerificationPolicyLines(strategy.policy, max));
   return lines.join("\n");
+}
+
+export function formatVerificationPolicy(policy: VerificationPolicy, max = 8): string {
+  return formatVerificationPolicyLines(policy, max).join("\n");
+}
+
+function formatVerificationPolicyLines(policy: VerificationPolicy, max = 8): string[] {
+  const lines = [
+    `summary: ${policy.summary}`,
+    policy.touchedFiles.length > 0 ? `touched files: ${policy.touchedFiles.slice(0, 6).join(", ")}` : "touched files: none inferred",
+    "matrix:",
+  ];
+  if (policy.matrix.length === 0) {
+    lines.push("- none");
+  } else {
+    lines.push(...policy.matrix.slice(0, max).map(item => `- ${item.id} [${item.status}] ${item.category}${item.required ? " required" : " optional"}: ${item.command || "manual review"} (${item.reason})`));
+    if (policy.matrix.length > max) lines.push(`...and ${policy.matrix.length - max} more`);
+  }
+  if (policy.coverageGaps.length > 0) {
+    lines.push("coverage gaps:", ...policy.coverageGaps.slice(0, max).map(item => `- ${item}`));
+  } else {
+    lines.push("coverage gaps: none");
+  }
+  return lines;
+}
+
+function normalizeVerificationPolicy(value: unknown, touchedFiles: string[], suggestions: VerificationSuggestion[], updatedAt: string, checks: VerificationCheck[] = []): VerificationPolicy {
+  if (!value || typeof value !== "object") return buildVerificationPolicy(touchedFiles, suggestions, checks, updatedAt);
+  const record = value as Record<string, unknown>;
+  const matrix = Array.isArray(record.matrix)
+    ? record.matrix.map(normalizeVerificationPolicyMatrixItem).filter((item): item is VerificationPolicyMatrixItem => !!item)
+    : [];
+  const policyTouchedFiles = touchedFiles.length > 0 ? touchedFiles : normalizeStringArray(record.touchedFiles).slice(0, 24);
+  const policy = buildVerificationPolicy(policyTouchedFiles, suggestions, checks, typeof record.updatedAt === "string" ? record.updatedAt : updatedAt);
+  if (matrix.length === 0 || touchedFiles.length > 0 || checks.length > 0) return policy;
+  const coverageGaps = normalizeStringArray(record.coverageGaps).slice(0, 12);
+  return {
+    updatedAt: policy.updatedAt,
+    summary: typeof record.summary === "string" && record.summary.trim() ? record.summary.trim() : summarizeVerificationPolicy(matrix, coverageGaps),
+    touchedFiles: policyTouchedFiles,
+    matrix,
+    coverageGaps,
+  };
+}
+
+function normalizeVerificationPolicyMatrixItem(value: unknown): VerificationPolicyMatrixItem | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || !isVerificationPolicyCategory(record.category) || !isVerificationPolicyStatus(record.status) || typeof record.reason !== "string" || typeof record.source !== "string") return undefined;
+  return {
+    id: record.id,
+    category: record.category,
+    required: record.required === true,
+    command: typeof record.command === "string" && record.command.trim() ? record.command.trim() : undefined,
+    reason: record.reason,
+    source: record.source,
+    touchedFiles: normalizeStringArray(record.touchedFiles).slice(0, 12),
+    satisfiedBy: normalizeStringArray(record.satisfiedBy).slice(0, 8),
+    status: record.status,
+  };
+}
+
+function buildVerificationPolicy(touchedFiles: string[], suggestions: VerificationSuggestion[], checks: VerificationCheck[], updatedAt: string): VerificationPolicy {
+  const files = dedupeStrings(touchedFiles).slice(0, 24);
+  const categories = inferVerificationPolicyCategories(files);
+  const matrix: VerificationPolicyMatrixItem[] = [];
+  for (const category of categories) {
+    const suggestion = selectVerificationSuggestionForCategory(category, suggestions);
+    const categoryFiles = files.filter(file => categorizeTouchedFile(file) === category);
+    const satisfiedBy = suggestion ? checks.filter(check => check.success && commandMatchesSuggestion(check.command || check.toolName, suggestion)).map(check => check.command || check.toolName) : [];
+    const required = category !== "docs" && category !== "other";
+    const status: VerificationPolicyStatus = suggestion ? satisfiedBy.length > 0 ? "covered" : "missing" : required ? "missing" : "manual";
+    matrix.push({
+      id: `VP${matrix.length + 1}`,
+      category,
+      required,
+      command: suggestion?.command,
+      reason: buildVerificationPolicyReason(category, categoryFiles, suggestion),
+      source: suggestion?.source || "touched files",
+      touchedFiles: categoryFiles.slice(0, 12),
+      satisfiedBy: dedupeStrings(satisfiedBy),
+      status,
+    });
+  }
+  if (matrix.length === 0 && suggestions.length > 0) {
+    const suggestion = suggestions.find(item => item.confidence === "high") || suggestions[0];
+    if (suggestion) {
+      const satisfiedBy = checks.filter(check => check.success && commandMatchesSuggestion(check.command || check.toolName, suggestion)).map(check => check.command || check.toolName);
+      matrix.push({
+        id: "VP1",
+        category: "workflow",
+        required: true,
+        command: suggestion.command,
+        reason: "No touched files were inferred; use the strongest project-level verification command before finishing.",
+        source: suggestion.source,
+        touchedFiles: [],
+        satisfiedBy: dedupeStrings(satisfiedBy),
+        status: satisfiedBy.length > 0 ? "covered" : "missing",
+      });
+    }
+  }
+  const coverageGaps = matrix
+    .filter(item => item.required && item.status === "missing")
+    .map(item => item.command ? `Run or record ${item.command} for ${item.category} changes.` : `Select and record verification for ${item.category} changes.`);
+  return {
+    updatedAt,
+    summary: summarizeVerificationPolicy(matrix, coverageGaps),
+    touchedFiles: files,
+    matrix,
+    coverageGaps,
+  };
+}
+
+function inferVerificationPolicyCategories(touchedFiles: string[]): VerificationPolicyCategory[] {
+  return dedupeStrings(touchedFiles.map(categorizeTouchedFile)).filter(isVerificationPolicyCategory);
+}
+
+function categorizeTouchedFile(file: string): VerificationPolicyCategory {
+  const normalized = file.replaceAll("\\", "/").toLowerCase();
+  if (/^(src|lib|app|server|client)\//.test(normalized) || /\.(ts|tsx|js|jsx|mjs|cjs|py|rs|go|cs|java|kt|swift|cpp|c|h)$/.test(normalized)) return "source";
+  if (/^(tests?|spec|__tests__)\//.test(normalized) || /\.(test|spec)\.[tj]sx?$/.test(normalized)) return "test";
+  if (/\.(md|mdx|rst|txt)$/.test(normalized) || normalized.startsWith("docs/")) return "docs";
+  if (/package\.json$|bun\.lock|pnpm-lock\.yaml|yarn\.lock|package-lock\.json$/.test(normalized)) return "package";
+  if (/\.(json|toml|ya?ml|ini|cfg)$/.test(normalized)) return "config";
+  if (normalized.startsWith(".project-flow/") || normalized.includes("workflow")) return "workflow";
+  return "other";
+}
+
+function selectVerificationSuggestionForCategory(category: VerificationPolicyCategory, suggestions: VerificationSuggestion[]): VerificationSuggestion | undefined {
+  const test = suggestions.find(item => /\b(test|pytest|cargo test|go test|dotnet test)\b/i.test(item.command));
+  const check = suggestions.find(item => /\b(check|typecheck|lint|doctor|build)\b/i.test(item.command));
+  if (category === "source") return check || test || suggestions[0];
+  if (category === "test") return test || check || suggestions[0];
+  if (category === "package" || category === "config") return check || test || suggestions[0];
+  if (category === "workflow") return check || test || suggestions[0];
+  return undefined;
+}
+
+function buildVerificationPolicyReason(category: VerificationPolicyCategory, files: string[], suggestion?: VerificationSuggestion): string {
+  const target = files.length > 0 ? `${files.length} touched ${category} file(s)` : `touched ${category} files`;
+  return suggestion ? `${target}; ${suggestion.reason}` : `${target}; manual review is safer than guessing a command.`;
+}
+
+function commandMatchesSuggestion(command: string | undefined, suggestion: VerificationSuggestion): boolean {
+  if (!command) return false;
+  const normalize = (value: string) => value.toLowerCase().replace(/^bun run\s+/, "").replace(/^npm run\s+/, "").trim();
+  return normalize(command) === normalize(suggestion.command) || command.toLowerCase().includes(suggestion.command.toLowerCase()) || suggestion.command.toLowerCase().includes(command.toLowerCase());
+}
+
+function summarizeVerificationPolicy(matrix: VerificationPolicyMatrixItem[], coverageGaps: string[]): string {
+  if (matrix.length === 0) return "No verification policy rows generated.";
+  if (coverageGaps.length === 0) return `Verification policy covered ${matrix.length}/${matrix.length} row(s).`;
+  return `Verification policy has ${coverageGaps.length} coverage gap(s) across ${matrix.length} row(s).`;
+}
+
+function isVerificationPolicyCategory(value: unknown): value is VerificationPolicyCategory {
+  return value === "source" || value === "test" || value === "docs" || value === "config" || value === "package" || value === "workflow" || value === "other";
+}
+
+function isVerificationPolicyStatus(value: unknown): value is VerificationPolicyStatus {
+  return value === "covered" || value === "missing" || value === "manual";
 }
 
 export async function readAcceptance(root: string, taskId: string): Promise<AcceptanceState> {
@@ -5695,11 +6173,12 @@ function formatSnapshotVerification(verification: VerificationState): string {
 
 async function buildReadinessState(root: string, task: TaskState, reason: string): Promise<ReadinessState> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [acceptance, verification, plan, clarification] = await Promise.all([
+  const [acceptance, verification, plan, clarification, strategy] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readVerification(root, currentTask.id),
     readPlan(root, currentTask.id),
     readTaskClarification(root, currentTask.id),
+    readVerificationStrategy(root, currentTask.id),
   ]);
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -5760,6 +6239,10 @@ async function buildReadinessState(root: string, task: TaskState, reason: string
   }
   if (failedChecks.length > 0 && lastCheck?.success) {
     warnings.push(`${failedChecks.length} earlier verification check(s) failed; confirm the latest pass covers the fix.`);
+  }
+  if (strategy.policy.coverageGaps.length > 0 && verification.checks.length > 0) {
+    warnings.push(`${strategy.policy.coverageGaps.length} verification coverage gap(s) remain.`);
+    nextActions.push(...strategy.policy.coverageGaps.slice(0, 4));
   }
 
   if (currentTask.counters.failedToolCalls > 0) {
@@ -5905,12 +6388,13 @@ function dedupeStrings(items: string[]): string[] {
 
 async function buildResumeState(root: string, task: TaskState, reason: string): Promise<ResumeState> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [events, acceptance, verification, plan, clarification] = await Promise.all([
+  const [events, acceptance, verification, plan, clarification, strategy] = await Promise.all([
     readTaskEvents(root, currentTask.id),
     readAcceptance(root, currentTask.id),
     readVerification(root, currentTask.id),
     readPlan(root, currentTask.id),
     readTaskClarification(root, currentTask.id),
+    readVerificationStrategy(root, currentTask.id),
   ]);
   const failedVerificationChecks = verification.checks.filter(check => !check.success);
   return {
@@ -5929,6 +6413,7 @@ async function buildResumeState(root: string, task: TaskState, reason: string): 
       .map(formatAcceptanceItemLine)
       .slice(0, 12),
     failedChecks: failedVerificationChecks.slice(-8).map(formatVerificationCheckLine),
+    verificationCoverageGaps: strategy.policy.coverageGaps.slice(0, 12),
   };
 }
 
@@ -5954,6 +6439,10 @@ export function formatTaskResume(task: TaskState, resume: ResumeState): string {
     "## Failed Checks",
     "",
     formatResumeList(resume.failedChecks, "No failed verification checks recorded."),
+    "",
+    "## Verification Coverage Gaps",
+    "",
+    formatResumeList(resume.verificationCoverageGaps, "No verification coverage gaps recorded."),
     "",
     "## Recently Touched Files",
     "",
@@ -6124,6 +6613,7 @@ function formatResumeContext(resume: ResumeState, max = 1800): string {
     `- next action: ${resume.nextAction}`,
     resume.openAcceptance.length > 0 ? `- open acceptance: ${resume.openAcceptance.slice(0, 4).join("; ")}` : "- open acceptance: none recorded",
     resume.failedChecks.length > 0 ? `- failed checks: ${resume.failedChecks.slice(-3).join("; ")}` : "- failed checks: none recorded",
+    resume.verificationCoverageGaps.length > 0 ? `- verification coverage gaps: ${resume.verificationCoverageGaps.slice(0, 3).join("; ")}` : "- verification coverage gaps: none recorded",
     resume.touchedFiles.length > 0 ? `- touched files: ${resume.touchedFiles.slice(0, 8).join(", ")}` : "- touched files: none inferred",
     resume.recentEvents.length > 0
       ? `- recent events: ${resume.recentEvents.slice(-5).map(event => `${event.type} ${event.summary}`).join("; ")}`

@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ActiveTaskScope, AutoSubtaskMode, ClarificationAxis, ClarificationState, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
+import type { ActiveTaskScope, AutoSubtaskMode, ClarificationAxis, ClarificationState, SubtaskPlanTemplate, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
@@ -453,7 +453,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       }
       const effectiveMode = parsed.mode || await readProjectAutoSubtaskMode(root);
       if (parsed.action === "apply") {
-        if (parsed.mode) await writeSubtaskPlan(root, task, parsed.mode, "command_mode");
+        if (parsed.mode || parsed.template || parsed.maxDepth) await writeSubtaskPlan(root, task, effectiveMode, "command_mode", { template: parsed.template, maxDepth: parsed.maxDepth });
         const result = await applySubtaskPlan(root, task.id);
         if (result.status === "missing") {
           ctx.ui.notify(`No matching Project Flow task for ${task.id}.`, "warning");
@@ -471,10 +471,10 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         );
         return;
       }
-      const shouldRegenerate = parsed.action === "refresh" || !!parsed.mode;
+      const shouldRegenerate = parsed.action === "refresh" || !!parsed.mode || !!parsed.template || !!parsed.maxDepth;
       const plan = shouldRegenerate
-        ? await writeSubtaskPlan(root, task, effectiveMode, parsed.action === "refresh" ? "command_refresh" : "command_mode")
-        : (await readSubtaskPlan(root, task.id)) || await writeSubtaskPlan(root, task, effectiveMode, "command");
+        ? await writeSubtaskPlan(root, task, effectiveMode, parsed.action === "refresh" ? "command_refresh" : "command_mode", { template: parsed.template, maxDepth: parsed.maxDepth })
+        : (await readSubtaskPlan(root, task.id)) || await writeSubtaskPlan(root, task, effectiveMode, "command", { template: parsed.template, maxDepth: parsed.maxDepth });
       if ((parsed.mode === "auto" || (parsed.action === "refresh" && effectiveMode === "auto")) && plan.items.some(item => item.status === "suggested")) {
         const result = await applySubtaskPlan(root, task.id);
         await refreshSubtaskPlanArtifacts(root, task.id, "subtask_plan_auto_applied");
@@ -867,11 +867,11 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
       }
-      const strategy = await readVerificationStrategy(root, task.id);
+      const refreshed = await refreshVerificationStrategy(root, task.id);
       ctx.ui.notify(
         [
           `Verification suggestions for ${task.id}:`,
-          formatVerificationSuggestions(strategy, 12),
+          formatVerificationSuggestions(refreshed, 12),
         ].join("\n"),
         "info",
       );
@@ -1372,10 +1372,12 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     return { query: "", evidence: trimmed };
   }
 
-  function parseSubtaskPlanArgs(args: string): { action: "show" | "refresh" | "apply"; query: string; mode?: AutoSubtaskMode } {
+  function parseSubtaskPlanArgs(args: string): { action: "show" | "refresh" | "apply"; query: string; mode?: AutoSubtaskMode; template?: SubtaskPlanTemplate; maxDepth?: number } {
     const parts = args.trim().split(/\s+/).filter(Boolean);
     let action: "show" | "refresh" | "apply" = "show";
     let mode: AutoSubtaskMode | undefined;
+    let template: SubtaskPlanTemplate | undefined;
+    let maxDepth: number | undefined;
     const queryParts: string[] = [];
     for (let i = 0; i < parts.length; i += 1) {
       const part = parts[i];
@@ -1409,9 +1411,30 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         mode = modeMatch[1] as AutoSubtaskMode;
         continue;
       }
+      if (part === "--template" && isSubtaskTemplateArg(parts[i + 1])) {
+        template = parts[i + 1];
+        i += 1;
+        continue;
+      }
+      const templateMatch = part.match(/^--template=(auto|acceptance|workflow|roles|verification)$/);
+      if (templateMatch) {
+        template = templateMatch[1] as SubtaskPlanTemplate;
+        continue;
+      }
+      if ((part === "--depth" || part === "--max-depth") && parts[i + 1]) {
+        const parsedDepth = Number(parts[i + 1]);
+        if (Number.isFinite(parsedDepth)) maxDepth = parsedDepth;
+        i += 1;
+        continue;
+      }
+      const depthMatch = part.match(/^--(?:depth|max-depth)=(\d+)$/);
+      if (depthMatch) {
+        maxDepth = Number(depthMatch[1]);
+        continue;
+      }
       queryParts.push(part);
     }
-    return { action, mode, query: queryParts.join(" ") };
+    return { action, mode, template, maxDepth, query: queryParts.join(" ") };
   }
 
   function parseRoleOrchestrationArgs(args: string): { action: "show" | "refresh" | "start" | "done" | "block"; query: string; role?: TaskRoleId; note?: string } {
@@ -1451,6 +1474,10 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
 
   function isSubtaskModeArg(value: string | undefined): value is AutoSubtaskMode {
     return value === "off" || value === "suggest" || value === "auto";
+  }
+
+  function isSubtaskTemplateArg(value: string | undefined): value is SubtaskPlanTemplate {
+    return value === "auto" || value === "acceptance" || value === "workflow" || value === "roles" || value === "verification";
   }
 
   function parseVerificationRemediationArgs(args: string): { action: "show" | "refresh" | "start" | "pass" | "fail" | "stop"; query: string; note?: string } {

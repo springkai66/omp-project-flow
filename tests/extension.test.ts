@@ -351,6 +351,27 @@ describe("project flow extension", () => {
     });
   });
 
+  test("uses subtask templates and depth through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, [
+        "implement templated command subtask planning",
+        "- Acceptance: split implementation work",
+        "- Acceptance: verify generated child task tree",
+        "- Acceptance: preserve parent active task",
+      ].join("\n"), { subtaskMode: "off" });
+
+      await fake.commands.get("task:subtasks").handler("--template workflow --depth 2", fake.ctx(root));
+      const plan = await readSubtaskPlan(root, task.id);
+      expect(plan?.template).toBe("workflow");
+      expect(plan?.maxDepth).toBe(2);
+      expect(plan?.items.some(item => item.depth === 2 && item.parentItemId)).toBe(true);
+      expect(fake.notifications.at(-1)?.message).toContain("template: workflow");
+    });
+  });
+
   test("shows and updates role orchestration through the command surface", async () => {
     await withTempProject(async root => {
       const fake = createFakePi();

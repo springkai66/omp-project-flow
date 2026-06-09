@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.23.0
+
+- Added verification policy matrix rows that compare inferred touched-file categories with suggested project checks.
+- Verification strategy files now persist coverage gaps and covered rows instead of only listing commands.
+- Readiness, resume packs, snapshots, and `/verify:suggest` now surface verification coverage gaps without running commands silently.
+
+## 0.22.0
+
+- Added richer subtask planning templates for acceptance, workflow, roles, and verification splits.
+- Subtask plans now persist item order, depth, dependencies, parent plan-item links, template, and max-depth metadata.
+- Subtask trees now include deeper rollups by status, phase, depth, leaves, truncation, and blocked subtasks.
+
 ## 0.21.0
 
 - Added focused PRD refinement mode with required axes for goal, scope, users, acceptance, constraints, non-goals, verification, and risk.
