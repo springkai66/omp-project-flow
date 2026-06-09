@@ -18,6 +18,200 @@ Project Flow 已经具备任务状态、验收项、计划、研究证据、PRD 
 
 但相对 Trellis，Project Flow 仍主要是“记录与提示系统”，不是“强制流程门禁系统”。Trellis 的核心优势在于：规则可执行、检查可阻塞、失败有固定 verdict、项目间可继承、git 边界可兜底、定期审计可把问题重新纳入治理闭环。
 
+## Oh My Pi 项目开发必备能力缺口
+
+这一节从 Oh My Pi 作为“真实项目开发平台”的角度记录必备能力缺口。Project Flow 已经补上任务状态、验收、计划、研究证据、PRD review、验证建议、失败分类、remediation next actions、handoff/resume/snapshot/context 等基础能力；但平台层仍需要更强的工程闭环。
+
+### 1. 项目级 Definition of Done
+
+必备能力：
+
+- 每个任务必须有机器可检查的完成条件。
+- 完成时必须记录验收项、计划项、验证命令、退出码、变更文件、风险和证据。
+- 缺少有效 receipt 时，finish readiness 应给出 blocker 或 warning。
+
+当前缺口：
+
+- Project Flow 已能记录验收、计划和验证，但 receipt schema 还不统一。
+- “完成”仍依赖 agent 总结，缺少跨任务一致的证据格式。
+
+### 2. 统一 process gate
+
+必备能力：
+
+- 在任务完成、提交或推送前输出统一工程门禁报告。
+- 报告应覆盖 PR 卫生、secrets、bypass markers、tests/coverage、docs discipline、stack-specific gates。
+- 输出稳定 verdict：`MERGEABLE / NEEDS CHANGES / BLOCKED`。
+
+当前缺口：
+
+- Project Flow 有 finish readiness 和 verification remediation，但还没有完整 process gate。
+- 失败项缺少固定 finding block 和人工接受 warning 的记录机制。
+
+### 3. 强验证策略与验证闭环
+
+必备能力：
+
+- 支持用户配置 typecheck、lint、unit test、integration test、e2e、build。
+- 支持按项目栈、路径和变更类型选择必要验证。
+- 验证失败后必须分类、记录证据、生成 next action，并阻止假完成。
+
+当前缺口：
+
+- Project Flow 可推断验证命令并记录结果，但验证策略主要靠自动识别。
+- 还缺用户可声明的 verification/process policy。
+
+### 4. git 边界保护
+
+必备能力：
+
+- 提交前检查 staged files。
+- commit message 检查。
+- push 前运行 gate。
+- 阻止直接推送 protected branch。
+- 检测 `--no-verify`、force push、hard reset、secrets 和危险 diff。
+
+当前缺口：
+
+- Project Flow 可以记录 git 操作，但没有 git-boundary 防线。
+- 不应默认安装 hooks；应先做可审阅报告，再由用户 opt-in。
+
+### 5. 安全与危险操作防护
+
+必备能力：
+
+- 拦截危险命令、敏感文件读取、破坏性 git 操作、数据库删除、secrets 访问。
+- 对高风险操作要求明确确认。
+- 所有 bypass 必须留下审计记录。
+
+当前缺口：
+
+- Project Flow 记录工具事件，但没有平台级 PreToolUse 风险拦截。
+- OMP runtime 若未暴露稳定 hook，只能先实现报告型策略。
+
+### 6. 代码审查 gate
+
+必备能力：
+
+- 对 edit-heavy diff 自动生成 code review。
+- finding 应包含文件、行号、严重级别、问题、修复建议和置信度。
+- critical finding 应阻塞完成。
+
+当前缺口：
+
+- Project Flow 有 check role handoff，但没有真正的自动 review gate。
+- 缺少安全、性能、API 设计、测试覆盖、可维护性维度的统一审查。
+
+### 7. UI 与可视化验证
+
+必备能力：
+
+- UI 文件变更后检查 dev server、打开页面、截图并记录 artifact。
+- 截图不可用时给 advisory；工具可用且产物为空时 block。
+
+当前缺口：
+
+- Project Flow 没有 UI verify gate。
+- 对前端项目仍主要依赖测试和人工判断。
+
+### 8. 需求澄清与 PRD 深化
+
+必备能力：
+
+- 自动识别 goal、scope、user、acceptance、non-goals、constraints、verification、risk 的缺失项。
+- 模糊需求必须一问一答澄清，不应由 agent 编造。
+- 需求变更应有 diff 和决策记录。
+
+当前状态：
+
+- Project Flow 已有 `/prd:refine`、PRD review 和 acceptance coverage。
+- 后续缺口主要是更强的交互式设计 review 和 agent-assisted planning。
+
+### 9. 多 agent 编排
+
+必备能力：
+
+- 支持 researcher、implementer、reviewer、tester、designer、security reviewer 等角色。
+- 每个角色都有输入、输出、owned files、expected artifacts、verification scope。
+- 支持依赖、并行、冲突检测和子任务 rollup。
+
+当前缺口：
+
+- Project Flow 已有 role handoff packets，但还没有 runtime 级独立 agent 自动编排。
+- 在 OMP 未暴露安全 agent/session API 前，只能保持显式、可审阅、手动启动。
+
+### 10. 持久上下文与 session 恢复
+
+必备能力：
+
+- 记录 active task、分支、最近提交、dirty files、open risks、last verification、blocked reason。
+- compact 前保存 context log，恢复后重新注入。
+
+当前状态：
+
+- Project Flow 已有 handoff/resume/snapshot/hidden context 和 session-scoped active task。
+- 仍缺更完整的 session lifecycle hook 和跨 worktree context-log 策略。
+
+### 11. 上游能力同步
+
+必备能力：
+
+- reviewed upstream snapshot。
+- capability diff。
+- evidence excerpt。
+- source freshness 和 confidence。
+- local status mapping。
+- proposed implementation task。
+
+当前缺口：
+
+- Project Flow 有 upstream sync report，但上游变化仍主要靠人工 review。
+- 缺少把 Trellis/ECC/OMO/Superpowers 新能力稳定映射为本地任务的闭环。
+
+### 12. 审计与规则沉淀
+
+必备能力：
+
+- gotchas 记录。
+- repeated issue clustering。
+- drift audit。
+- bypass audit。
+- rule proposal。
+- spec promotion。
+
+当前缺口：
+
+- Project Flow 有 spec proposals，但没有定期审计和重复问题聚类。
+- 缺少把反复出现的问题提升为 durable rule 的自动建议机制。
+
+### 13. 回滚与事故响应
+
+必备能力：
+
+- 变更批次记录。
+- touched files snapshot。
+- rollback plan。
+- failed deployment / failed verification incident record。
+- revert guidance。
+
+当前缺口：
+
+- Project Flow 记录任务过程，但没有专门的 rollback/incident artifact。
+- 高风险变更缺少自动回滚方案提示。
+
+### 14. 文档纪律
+
+必备能力：
+
+- 判断是否需要更新 README、CHANGELOG、docs、migration guide、API docs。
+- 文档更新应发生在功能确认可工作之后。
+- 文档不能替代实现。
+
+当前状态：
+
+- Project Flow 已将 docs discipline 纳入 gaps 和任务流程习惯。
+- 仍缺 process gate 级的文档纪律检查。
+
 ## P0：最高优先级缺口
 
 ### 1. 预合并 process gate 尚未闭环
@@ -314,10 +508,12 @@ Project Flow 已经具备任务状态、验收项、计划、研究证据、PRD 
 
 ## 当前推荐开发顺序
 
-1. 先补 upstream reviewed snapshots 与 capability diff proposals，减少后续参考 Trellis 时的重复研究成本。
-2. 再补 process gate 的本地报告与 readiness 阻塞。
-3. 再补 configurable verification/process policy。
-4. 最后在 OMP runtime 支持安全 hook 或 agent session 后，接入真正的阻塞式 stop gate、fast-local gate 和角色执行闭环。
+1. 先补 process gate 的本地报告与 readiness 阻塞，这是项目交付前最关键的总门禁。
+2. 再补 configurable verification/process policy，把自动推断升级为用户可声明策略。
+3. 再补 receipt / Definition of Done，让每次完成都有统一证据格式。
+4. 再补 git-boundary guard、code review gate、UI verify gate。
+5. 继续补 upstream reviewed snapshots 与 capability diff proposals，降低后续参考 Trellis/ECC/OMO/Superpowers 的研究成本。
+6. 最后在 OMP runtime 支持安全 hook 或 agent session 后，接入真正的阻塞式 stop gate、fast-local gate 和角色执行闭环。
 
 ## 明确边界
 
