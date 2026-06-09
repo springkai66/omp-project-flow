@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.17.0
+
+- Exposed `autoSubtaskMode` as an OMP plugin setting with `off`, `suggest`, and `auto` policies.
+- Added project override support for automatic subtask planning through `.omp/plugin-overrides.json` or `.pi/plugin-overrides.json`.
+- Added deterministic complexity scoring to subtask plans and summaries.
+- `/task:subtasks` now accepts `--mode off|suggest|auto` plus `--off`, `--suggest`, and `--auto` shortcuts.
+
 ## 0.16.0
 
 - Added Auto Subtask Planner v1 with generated child-task suggestions under `subtasks/plan.json` and `subtasks/plan.md`.

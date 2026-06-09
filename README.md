@@ -112,7 +112,7 @@ Commands are escape hatches and diagnostics:
 /task:metadata [id-prefix-or-title]
 /task:child <prompt>
 /task:tree [id-prefix-or-title]
-/task:subtasks [--refresh|--apply] [id-prefix-or-title]
+/task:subtasks [--refresh|--apply] [--mode off|suggest|auto] [id-prefix-or-title]
 /task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
@@ -147,6 +147,8 @@ Commands are escape hatches and diagnostics:
 ```
 
 Normal work does not require commands. The task commands are useful when you want to inspect, resume, or switch long-running work.
+
+Subtask planning policy is controlled by the `autoSubtaskMode` plugin setting: `off` disables automatic plans for new root tasks, `suggest` records guarded proposals for review, and `auto` creates linked child tasks from generated proposals. Project-local overrides can set `settings["omp-project-flow"].autoSubtaskMode` in `.omp/plugin-overrides.json` or `.pi/plugin-overrides.json`. `/task:subtasks --mode off|suggest|auto` can regenerate one task's plan with an explicit policy.
 
 Clarification is automatic when the initial PRD has open questions. While a required clarification loop is collecting, the next normal user reply is recorded as the current answer, and the injected context tells the agent to ask only the next question before planning or implementing. Use `/task:clarify` for the compact command surface, or `/clarify:*` when you want explicit start/status/answer/skip/finish control.
 
@@ -203,7 +205,7 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
 
 Task metadata is stored inside each `task.json` under `metadata`. It records stable, non-derived fields such as `kind`, `source`, `priority`, `risk`, `labels`, `origin`, and task relationships. Derived state such as readiness, verification counts, and touched files remains in snapshot/resume/readiness artifacts.
 
-Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId` and `childTaskIds`. Project Flow creates a guarded subtask plan for complex root tasks under `subtasks/plan.json` and `subtasks/plan.md`; use `/task:subtasks` to inspect suggestions, `/task:subtasks --refresh` to regenerate them, and `/task:subtasks --apply` to create linked child tasks. Use `/task:child <prompt>` to create a child manually and `/task:tree` to inspect the tree. Parent task readiness is blocked while child tasks remain unfinished, unless `/task:finish --force` is used.
+Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId` and `childTaskIds`. Project Flow creates a guarded subtask plan for complex root tasks under `subtasks/plan.json` and `subtasks/plan.md`; each plan records deterministic complexity scoring plus the active `off`, `suggest`, or `auto` policy. Use `/task:subtasks` to inspect suggestions, `/task:subtasks --refresh` to regenerate them, `/task:subtasks --mode auto --refresh` to regenerate and immediately create child tasks, and `/task:subtasks --apply` to create linked child tasks from existing suggestions. Use `/task:child <prompt>` to create a child manually and `/task:tree` to inspect the tree. Parent task readiness is blocked while child tasks remain unfinished, unless `/task:finish --force` is used.
 
 Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`.
 
@@ -235,6 +237,13 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.17.0
+
+- Exposed `autoSubtaskMode` with `off`, `suggest`, and `auto` policies.
+- Added project-local override support through `.omp/plugin-overrides.json` and `.pi/plugin-overrides.json`.
+- Added deterministic complexity scoring to subtask plans and summaries.
+- Added `/task:subtasks --mode off|suggest|auto` plus shortcut flags.
 
 ### 0.16.0
 

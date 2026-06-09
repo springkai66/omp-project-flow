@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -22,6 +22,7 @@ import {
   loadActiveTask,
   loadTask,
   readProjectOverview,
+  readProjectAutoSubtaskMode,
   readPlan,
   readAcceptance,
   refreshSubtaskPlanArtifacts,
@@ -246,6 +247,42 @@ describe("project flow core", () => {
 
       const refreshed = await writeSubtaskPlan(root, task, "suggest", "test_refresh");
       expect(refreshed.items.some(item => item.status === "created")).toBe(true);
+    });
+  });
+
+  test("auto subtask mode creates linked child tasks immediately", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, [
+        "implement automatic child task creation",
+        "- Acceptance: create child task suggestions",
+        "- Acceptance: apply suggestions without a second command",
+        "- Acceptance: preserve the parent as the active task",
+      ].join("\n"), { subtaskMode: "auto" });
+
+      const plan = await readSubtaskPlan(root, task.id);
+      expect(plan?.mode).toBe("auto");
+      expect(plan?.complexity.level).toBe("complex");
+      expect(plan?.items.some(item => item.status === "created" && !!item.childTaskId)).toBe(true);
+      const tree = await buildSubtaskTree(root, task.id);
+      expect(tree?.totalTasks).toBeGreaterThan(1);
+      expect((await loadActiveTask(root))?.id).toBe(task.id);
+    });
+  });
+
+  test("reads project override for automatic subtask mode", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      await mkdir(path.join(root, ".omp"), { recursive: true });
+      await writeFile(path.join(root, ".omp", "plugin-overrides.json"), JSON.stringify({
+        settings: {
+          "omp-project-flow": {
+            autoSubtaskMode: "off",
+          },
+        },
+      }, null, 2));
+
+      expect(await readProjectAutoSubtaskMode(root)).toBe("off");
     });
   });
 

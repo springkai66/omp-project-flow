@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ClarificationState, TaskState } from "./core";
+import type { AutoSubtaskMode, ClarificationState, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
@@ -38,6 +38,7 @@ import {
   nextPlanStep,
   pauseActiveTask,
   readAcceptance,
+  readProjectAutoSubtaskMode,
   readPlan,
   readSpecDocuments,
   refreshSubtaskPlanArtifacts,
@@ -125,7 +126,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const prompt = args.trim() || "Manual project task";
-      const task = await createTask(root, prompt);
+      const task = await createTask(root, prompt, { subtaskMode: await readProjectAutoSubtaskMode(root) });
       ctx.ui.notify(`Created task ${task.id}`, "info");
     },
   });
@@ -439,7 +440,9 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
       }
+      const effectiveMode = parsed.mode || await readProjectAutoSubtaskMode(root);
       if (parsed.action === "apply") {
+        if (parsed.mode) await writeSubtaskPlan(root, task, parsed.mode, "command_mode");
         const result = await applySubtaskPlan(root, task.id);
         if (result.status === "missing") {
           ctx.ui.notify(`No matching Project Flow task for ${task.id}.`, "warning");
@@ -457,9 +460,24 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         );
         return;
       }
-      const plan = parsed.action === "refresh"
-        ? await writeSubtaskPlan(root, task, "suggest", "command_refresh")
-        : (await readSubtaskPlan(root, task.id)) || await writeSubtaskPlan(root, task, "suggest", "command");
+      const shouldRegenerate = parsed.action === "refresh" || !!parsed.mode;
+      const plan = shouldRegenerate
+        ? await writeSubtaskPlan(root, task, effectiveMode, parsed.action === "refresh" ? "command_refresh" : "command_mode")
+        : (await readSubtaskPlan(root, task.id)) || await writeSubtaskPlan(root, task, effectiveMode, "command");
+      if ((parsed.mode === "auto" || (parsed.action === "refresh" && effectiveMode === "auto")) && plan.items.some(item => item.status === "suggested")) {
+        const result = await applySubtaskPlan(root, task.id);
+        await refreshSubtaskPlanArtifacts(root, task.id, "subtask_plan_auto_applied");
+        ctx.ui.notify(
+          [
+            result.created.length > 0
+              ? `Created ${result.created.length} child task(s): ${result.created.map(child => child.id).join(", ")}`
+              : "No suggested subtasks were available to create.",
+            result.plan ? formatSubtaskPlanSummary(result.plan, 12) : formatSubtaskPlanSummary(plan, 12),
+          ].join("\n"),
+          result.created.length > 0 ? "info" : "warning",
+        );
+        return;
+      }
       await refreshSubtaskPlanArtifacts(root, task.id, parsed.action === "refresh" ? "subtask_plan_refreshed" : "subtask_plan_shown");
       ctx.ui.notify(formatSubtaskPlanSummary(plan, 12), plan.items.length > 0 ? "info" : "warning");
     },
@@ -920,6 +938,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         labels: ["upstream"],
         risk: report.totals.missing > 0 ? "medium" : "low",
         origin: { note: note || "upstream sync command" },
+        subtaskMode: await readProjectAutoSubtaskMode(root),
       });
       ctx.ui.notify(`Created upstream sync task ${task.id}`, "info");
     },
@@ -934,17 +953,18 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     const prompt = event.prompt || "";
     const active = await loadActiveTask(root);
     const specs = await readSpecDocuments(root);
+    const subtaskMode = await readProjectAutoSubtaskMode(root);
 
     let task = active;
     const activeClarification = task ? await readTaskClarification(root, task.id) : undefined;
     if (task && task.status === "active" && shouldCaptureClarificationAnswer(activeClarification, prompt)) {
-      task = await getOrCreateActiveTask(root, prompt);
+      task = await getOrCreateActiveTask(root, prompt, { subtaskMode });
       await answerTaskClarification(root, task.id, prompt, "user_prompt");
     } else if (!task && isCodeWorkPrompt(prompt)) {
-      task = await getOrCreateActiveTask(root, prompt);
+      task = await getOrCreateActiveTask(root, prompt, { subtaskMode });
       ctx.ui.notify(`Project Flow started ${task.id}`, "info");
     } else if (task && task.status === "active") {
-      task = await getOrCreateActiveTask(root, prompt);
+      task = await getOrCreateActiveTask(root, prompt, { subtaskMode });
     }
 
     if (!task && specs.length === 0) return undefined;
@@ -1220,11 +1240,13 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     return { query: "", evidence: trimmed };
   }
 
-  function parseSubtaskPlanArgs(args: string): { action: "show" | "refresh" | "apply"; query: string } {
+  function parseSubtaskPlanArgs(args: string): { action: "show" | "refresh" | "apply"; query: string; mode?: AutoSubtaskMode } {
     const parts = args.trim().split(/\s+/).filter(Boolean);
     let action: "show" | "refresh" | "apply" = "show";
+    let mode: AutoSubtaskMode | undefined;
     const queryParts: string[] = [];
-    for (const part of parts) {
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
       if (part === "--apply" || part === "apply") {
         action = "apply";
         continue;
@@ -1233,9 +1255,35 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         action = "refresh";
         continue;
       }
+      if (part === "--auto") {
+        mode = "auto";
+        continue;
+      }
+      if (part === "--suggest") {
+        mode = "suggest";
+        continue;
+      }
+      if (part === "--off") {
+        mode = "off";
+        continue;
+      }
+      if (part === "--mode" && isSubtaskModeArg(parts[i + 1])) {
+        mode = parts[i + 1];
+        i += 1;
+        continue;
+      }
+      const modeMatch = part.match(/^--mode=(off|suggest|auto)$/);
+      if (modeMatch) {
+        mode = modeMatch[1] as AutoSubtaskMode;
+        continue;
+      }
       queryParts.push(part);
     }
-    return { action, query: queryParts.join(" ") };
+    return { action, mode, query: queryParts.join(" ") };
+  }
+
+  function isSubtaskModeArg(value: string | undefined): value is AutoSubtaskMode {
+    return value === "off" || value === "suggest" || value === "auto";
   }
 
   function parseFinishArgs(args: string): { note?: string; force: boolean } {

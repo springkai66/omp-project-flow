@@ -112,7 +112,7 @@ omp plugin list
 /task:metadata [id-prefix-or-title]
 /task:child <prompt>
 /task:tree [id-prefix-or-title]
-/task:subtasks [--refresh|--apply] [id-prefix-or-title]
+/task:subtasks [--refresh|--apply] [--mode off|suggest|auto] [id-prefix-or-title]
 /task:clarify [answer|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
@@ -147,6 +147,8 @@ omp plugin list
 ```
 
 普通工作不需要命令。任务命令适合在你想检查、恢复或切换长期任务时使用。
+
+Subtask 规划策略由 `autoSubtaskMode` 插件设置控制：`off` 禁用新 root task 的自动计划，`suggest` 只记录可审阅建议，`auto` 会从建议中创建已关联 child tasks。项目级覆盖可在 `.omp/plugin-overrides.json` 或 `.pi/plugin-overrides.json` 中设置 `settings["omp-project-flow"].autoSubtaskMode`。`/task:subtasks --mode off|suggest|auto` 可对单个任务用显式策略重新生成计划。
 
 当初始 PRD 有开放问题时，clarification 会自动进入一问一答流程。必需澄清仍在 collecting 时，下一条普通用户输入会被记录为当前问题答案，隐藏上下文会要求 agent 只问下一题，暂不进入计划或实现。日常使用 `/task:clarify` 即可；需要显式控制时可以用 `/clarify:*` 系列命令。
 
@@ -203,7 +205,7 @@ omp plugin list
 
 任务 metadata 存在每个 `task.json` 的 `metadata` 字段中。它只记录稳定、非派生信息，例如 `kind`、`source`、`priority`、`risk`、`labels`、`origin` 和任务关系。readiness、验证数量、触碰文件等派生状态仍由 snapshot/resume/readiness artifacts 生成。
 
-Subtask 是通过 `metadata.relationships.parentTaskId` 和 `childTaskIds` 关联的普通任务。Project Flow 会为复杂根任务在 `subtasks/plan.json` 和 `subtasks/plan.md` 下生成受控子任务计划；使用 `/task:subtasks` 查看建议，`/task:subtasks --refresh` 重新生成，`/task:subtasks --apply` 创建已关联的子任务。也可以用 `/task:child <prompt>` 手动创建子任务，用 `/task:tree` 查看任务树。当子任务尚未完成时，父任务 readiness 会阻止收尾；仍可用 `/task:finish --force` 覆盖。
+Subtask 是通过 `metadata.relationships.parentTaskId` 和 `childTaskIds` 关联的普通任务。Project Flow 会为复杂 root task 在 `subtasks/plan.json` 和 `subtasks/plan.md` 下生成受控子任务计划；每个计划都会记录确定性的 complexity scoring，以及当前 `off`、`suggest` 或 `auto` 策略。使用 `/task:subtasks` 查看建议，`/task:subtasks --refresh` 重新生成，`/task:subtasks --mode auto --refresh` 重新生成并立即创建 child tasks，`/task:subtasks --apply` 从现有建议创建已关联 child tasks。也可以用 `/task:child <prompt>` 手动创建子任务，用 `/task:tree` 查看任务树。当子任务尚未完成时，父任务 readiness 会阻止收尾；仍可用 `/task:finish --force` 覆盖。
 
 验证建议会从常见项目文件中推断，例如 `package.json`、`pyproject.toml`、`pytest.ini`、`Cargo.toml`、`go.mod`、`.sln`、`.csproj` 和 `Makefile`。
 
@@ -235,6 +237,13 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.17.0
+
+- 暴露 `autoSubtaskMode`，支持 `off`、`suggest` 和 `auto` 策略。
+- 支持通过 `.omp/plugin-overrides.json` 和 `.pi/plugin-overrides.json` 做项目级覆盖。
+- 子任务计划和摘要现在包含确定性的 complexity scoring。
+- 新增 `/task:subtasks --mode off|suggest|auto` 以及快捷 flag。
 
 ### 0.16.0
 

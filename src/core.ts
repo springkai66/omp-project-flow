@@ -279,6 +279,13 @@ export interface SubtaskTree {
 
 export type AutoSubtaskMode = "off" | "suggest" | "auto";
 export type SubtaskPlanItemStatus = "suggested" | "created" | "skipped";
+export type SubtaskComplexityLevel = "simple" | "moderate" | "complex";
+
+export interface SubtaskComplexity {
+  level: SubtaskComplexityLevel;
+  score: number;
+  reasons: string[];
+}
 
 export interface SubtaskPlanItem {
   id: string;
@@ -297,6 +304,7 @@ export interface SubtaskPlan {
   updatedAt: string;
   generatedFrom?: string;
   summary: string;
+  complexity: SubtaskComplexity;
   items: SubtaskPlanItem[];
 }
 
@@ -496,6 +504,45 @@ export interface CreateTaskOptions {
   custom?: Record<string, unknown>;
   activate?: boolean;
   subtaskMode?: AutoSubtaskMode;
+}
+
+export const DEFAULT_AUTO_SUBTASK_MODE: AutoSubtaskMode = "suggest";
+
+const PROJECT_FLOW_PLUGIN_SETTING_KEYS = ["omp-project-flow", "project-flow", "Project Flow"];
+
+export interface ProjectFlowSettings {
+  autoSubtaskMode: AutoSubtaskMode;
+  source: "default" | "project-override";
+}
+
+export async function readProjectFlowSettings(root: string): Promise<ProjectFlowSettings> {
+  const fromOverride = await readProjectOverrideAutoSubtaskMode(root);
+  if (fromOverride) return { autoSubtaskMode: fromOverride, source: "project-override" };
+  return { autoSubtaskMode: DEFAULT_AUTO_SUBTASK_MODE, source: "default" };
+}
+
+export async function readProjectAutoSubtaskMode(root: string): Promise<AutoSubtaskMode> {
+  return (await readProjectFlowSettings(root)).autoSubtaskMode;
+}
+
+function normalizeAutoSubtaskMode(value: unknown): AutoSubtaskMode | undefined {
+  return isAutoSubtaskMode(value) ? value : undefined;
+}
+
+async function readProjectOverrideAutoSubtaskMode(root: string): Promise<AutoSubtaskMode | undefined> {
+  for (const file of [path.join(root, ".omp", "plugin-overrides.json"), path.join(root, ".pi", "plugin-overrides.json")]) {
+    if (!(await pathExists(file))) continue;
+    try {
+      const value = JSON.parse(await readFile(file, "utf8")) as { settings?: Record<string, Record<string, unknown>> };
+      for (const key of PROJECT_FLOW_PLUGIN_SETTING_KEYS) {
+        const mode = normalizeAutoSubtaskMode(value.settings?.[key]?.autoSubtaskMode);
+        if (mode) return mode;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
 }
 
 const DEFAULT_CHECKPOINTS: Checkpoint[] = [
@@ -1813,7 +1860,7 @@ export async function createTask(root: string, prompt: string, options: CreateTa
   await refreshVerificationStrategy(root, id);
   await writeInitialTaskResearch(root, task, prd, now);
   await writeClarificationFiles(root, task, clarification);
-  const subtaskMode = options.subtaskMode || "suggest";
+  const subtaskMode = options.subtaskMode || DEFAULT_AUTO_SUBTASK_MODE;
   if (subtaskMode !== "off" && !task.metadata.relationships.parentTaskId) {
     const subtaskPlan = await writeSubtaskPlan(root, task, subtaskMode, "created", { prd });
     if (subtaskMode === "auto" && subtaskPlan.items.length > 0) {
@@ -1828,7 +1875,7 @@ export async function createTask(root: string, prompt: string, options: CreateTa
   return task;
 }
 
-export async function getOrCreateActiveTask(root: string, prompt: string): Promise<TaskState> {
+export async function getOrCreateActiveTask(root: string, prompt: string, options: CreateTaskOptions = {}): Promise<TaskState> {
   const active = await loadActiveTask(root);
   if (active && active.status === "active") {
     const now = new Date().toISOString();
@@ -1839,7 +1886,7 @@ export async function getOrCreateActiveTask(root: string, prompt: string): Promi
     await writeTaskHandoff(root, active, "user_prompt");
     return active;
   }
-  return createTask(root, prompt);
+  return createTask(root, prompt, options);
 }
 
 export async function createChildTask(root: string, parentTaskId: string, prompt: string): Promise<TaskState | undefined> {
@@ -1894,7 +1941,8 @@ export async function writeSubtaskPlan(
   const existing = await readSubtaskPlan(root, currentTask.id);
   const prd = options.prd || extractPrd(currentTask.initialPrompt);
   const now = new Date().toISOString();
-  const suggestions = mode === "off" ? [] : buildSubtaskPlanItems(currentTask, prd, now);
+  const complexity = scoreSubtaskComplexity(currentTask, prd);
+  const suggestions = mode === "off" ? [] : buildSubtaskPlanItems(currentTask, prd, now, complexity);
   const existingByPrompt = new Map((existing?.items || []).map(item => [normalizeSubtaskPromptKey(item.prompt), item]));
   const items = suggestions.map(item => {
     const previous = existingByPrompt.get(normalizeSubtaskPromptKey(item.prompt));
@@ -1908,7 +1956,8 @@ export async function writeSubtaskPlan(
     generatedAt: existing?.generatedAt || now,
     updatedAt: now,
     generatedFrom: reason,
-    summary: summarizeSubtaskPlan(items, mode),
+    summary: summarizeSubtaskPlan(items, mode, complexity),
+    complexity,
     items,
   }) || {
     taskId: currentTask.id,
@@ -1917,13 +1966,14 @@ export async function writeSubtaskPlan(
     updatedAt: now,
     generatedFrom: reason,
     summary: "No subtask suggestions generated.",
+    complexity,
     items: [],
   };
   await persistSubtaskPlan(root, currentTask, plan);
   await appendTaskEvent(root, currentTask.id, {
     type: "subtask_plan_updated",
     timestamp: now,
-    data: { mode, reason, suggestions: plan.items.length },
+    data: { mode, reason, suggestions: plan.items.length, complexity: plan.complexity },
   });
   return plan;
 }
@@ -1966,7 +2016,7 @@ export async function applySubtaskPlan(root: string, taskId: string): Promise<Su
     updatedAt: now,
     generatedFrom: "apply",
     items: nextItems,
-    summary: summarizeSubtaskPlan(nextItems, plan.mode),
+    summary: summarizeSubtaskPlan(nextItems, plan.mode, plan.complexity),
   }) || plan;
   await persistSubtaskPlan(root, task, nextPlan);
   await appendTaskEvent(root, task.id, {
@@ -2084,6 +2134,10 @@ export function formatSubtaskPlan(plan: SubtaskPlan): string {
     "",
     plan.summary,
     "",
+    "## Complexity",
+    "",
+    formatSubtaskComplexity(plan.complexity),
+    "",
     "## Suggestions",
     "",
     plan.items.length === 0 ? "No subtask suggestions generated." : plan.items.map(formatSubtaskPlanItem).join("\n"),
@@ -2096,7 +2150,16 @@ export function formatSubtaskPlanSummary(plan: SubtaskPlan, max = 8): string {
   return [
     `subtask plan: ${plan.items.length} item(s), ${counts.suggested} suggested, ${counts.created} created, ${counts.skipped} skipped`,
     `mode: ${plan.mode}`,
+    `complexity: ${plan.complexity.level} (${plan.complexity.score})${plan.complexity.reasons.length > 0 ? ` - ${plan.complexity.reasons.slice(0, 3).join("; ")}` : ""}`,
     plan.items.length > 0 ? ["suggestions:", ...plan.items.slice(0, max).map(item => `- ${item.id} [${item.status}] ${item.title}${item.childTaskId ? ` -> ${item.childTaskId}` : ""}`)].join("\n") : "suggestions: none",
+  ].join("\n");
+}
+
+function formatSubtaskComplexity(complexity: SubtaskComplexity): string {
+  return [
+    `Level: ${complexity.level}`,
+    `Score: ${complexity.score}`,
+    complexity.reasons.length > 0 ? ["Reasons:", ...complexity.reasons.map(reason => `- ${reason}`)].join("\n") : "Reasons: none",
   ].join("\n");
 }
 
@@ -2162,7 +2225,8 @@ function normalizeSubtaskPlan(value: Partial<SubtaskPlan> | undefined): SubtaskP
     generatedAt: value.generatedAt,
     updatedAt: value.updatedAt,
     generatedFrom: typeof value.generatedFrom === "string" ? value.generatedFrom : undefined,
-    summary: typeof value.summary === "string" && value.summary.trim() ? value.summary : summarizeSubtaskPlan(items, mode),
+    summary: typeof value.summary === "string" && value.summary.trim() ? value.summary : summarizeSubtaskPlan(items, mode, normalizeSubtaskComplexity(value.complexity, items)),
+    complexity: normalizeSubtaskComplexity(value.complexity, items),
     items,
   };
 }
@@ -2182,20 +2246,38 @@ function normalizeSubtaskPlanItem(value: unknown): SubtaskPlanItem | undefined {
   };
 }
 
-function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPrd>, now: string): SubtaskPlanItem[] {
+function normalizeSubtaskComplexity(value: unknown, items: SubtaskPlanItem[]): SubtaskComplexity {
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (isSubtaskComplexityLevel(record.level) && typeof record.score === "number") {
+      const score = Number.isFinite(record.score) ? Math.max(0, Math.min(20, Math.round(record.score))) : 0;
+      return {
+        level: record.level,
+        score,
+        reasons: Array.isArray(record.reasons)
+          ? record.reasons.filter((reason): reason is string => typeof reason === "string" && reason.trim()).slice(0, 8)
+          : [],
+      };
+    }
+  }
+  return {
+    level: items.length > 0 ? "moderate" : "simple",
+    score: items.length > 0 ? 3 : 0,
+    reasons: ["Plan predates complexity scoring."],
+  };
+}
+
+
+function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPrd>, now: string, complexity: SubtaskComplexity): SubtaskPlanItem[] {
   const candidates: Array<{ title: string; prompt: string; reason: string }> = [];
   const goal = prd.goal || task.title;
   const acceptance = prd.acceptanceCriteria.filter(item => item.trim()).slice(0, 6);
   const constraints = prd.constraints.filter(item => item !== "Keep changes scoped to the requested workflow.").slice(0, 4);
   const openQuestions = prd.openQuestions.filter(isMeaningfulOpenQuestion).slice(0, 3);
   const explicitAcceptanceCount = countExplicitAcceptanceCriteria(task.initialPrompt);
-  const complexEnough = shouldSuggestResearchSubtask(task, prd) ||
-    explicitAcceptanceCount >= 2 ||
-    openQuestions.length > 0 ||
-    isComplexSubtaskPrompt(task.initialPrompt);
-  if (!complexEnough) return [];
+  if (complexity.level === "simple") return [];
 
-  if (shouldSuggestResearchSubtask(task, prd)) {
+  if (shouldSuggestResearchSubtask(task, prd, complexity)) {
     candidates.push({
       title: `Research ${shortTaskTitle(goal)}`,
       prompt: formatSuggestedSubtaskPrompt("Research", goal, [
@@ -2230,7 +2312,7 @@ function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPr
     });
   }
 
-  if (explicitAcceptanceCount >= 2 || isComplexSubtaskPrompt(task.initialPrompt)) {
+  if (explicitAcceptanceCount >= 2 || complexity.level === "complex") {
     candidates.push({
       title: `Verify ${shortTaskTitle(goal)}`,
       prompt: formatSuggestedSubtaskPrompt("Verify", goal, [
@@ -2252,18 +2334,86 @@ function buildSubtaskPlanItems(task: TaskState, prd: ReturnType<typeof extractPr
   }));
 }
 
-function shouldSuggestResearchSubtask(task: TaskState, prd: ReturnType<typeof extractPrd>): boolean {
-  return isComplexSubtaskPrompt(task.initialPrompt) ||
-    prd.openQuestions.some(isMeaningfulOpenQuestion) ||
-    /(research|investigate|architecture|design|upstream|迁移|兼容|调研|研究|架构|设计|上游)/i.test(task.initialPrompt);
+function scoreSubtaskComplexity(task: TaskState, prd: ReturnType<typeof extractPrd>): SubtaskComplexity {
+  let score = 0;
+  const reasons: string[] = [];
+  const prompt = task.initialPrompt;
+  const lines = prompt.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const listLines = lines.filter(line => /^[-*+]\s+|\d+[.)]\s+/.test(line)).length;
+  const explicitAcceptanceCount = countExplicitAcceptanceCriteria(prompt);
+  const meaningfulOpenQuestions = prd.openQuestions.filter(isMeaningfulOpenQuestion).length;
+
+  if (lines.length >= 5) {
+    score += 2;
+    reasons.push("five or more prompt lines");
+  } else if (lines.length >= 3) {
+    score += 1;
+    reasons.push("multi-line prompt");
+  }
+  if (listLines >= 3) {
+    score += 2;
+    reasons.push("three or more listed requirements");
+  } else if (listLines >= 2) {
+    score += 1;
+    reasons.push("multiple listed requirements");
+  }
+  if (explicitAcceptanceCount >= 3) {
+    score += 3;
+    reasons.push("three or more acceptance criteria");
+  } else if (explicitAcceptanceCount >= 2) {
+    score += 2;
+    reasons.push("multiple acceptance criteria");
+  } else if (explicitAcceptanceCount === 1) {
+    score += 1;
+    reasons.push("explicit acceptance criterion");
+  }
+  if (meaningfulOpenQuestions > 0) {
+    score += 2;
+    reasons.push("open PRD questions");
+  }
+  if (prd.constraints.length > 2) {
+    score += 1;
+    reasons.push("multiple constraints");
+  }
+  if (/(research|investigate|upstream|source|reference|调研|研究|上游|参考)/i.test(prompt)) {
+    score += 2;
+    reasons.push("research or upstream dependency");
+  }
+  if (/(architecture|orchestration|workflow|agent|subagent|multi-agent|session|state|架构|编排|流程|智能体|会话|状态)/i.test(prompt)) {
+    score += 2;
+    reasons.push("workflow or orchestration scope");
+  }
+  if (/(multi|multiple|several|end-to-end|integration|cross-file|迁移|兼容|多个|多处|完整|集成)/i.test(prompt)) {
+    score += 2;
+    reasons.push("multi-part implementation scope");
+  }
+  if (/(verify|test|lint|typecheck|validation|验证|测试|检查)/i.test(prompt)) {
+    score += 1;
+    reasons.push("explicit verification work");
+  }
+  if (task.metadata?.risk === "high") {
+    score += 2;
+    reasons.push("high-risk task metadata");
+  } else if (task.metadata?.risk === "medium") {
+    score += 1;
+    reasons.push("medium-risk task metadata");
+  }
+  if (task.metadata?.kind === "upstream-sync") {
+    score += 1;
+    reasons.push("upstream-sync task kind");
+  }
+
+  return {
+    level: score >= 6 ? "complex" : score >= 3 ? "moderate" : "simple",
+    score,
+    reasons: reasons.slice(0, 8),
+  };
 }
 
-function isComplexSubtaskPrompt(prompt: string): boolean {
-  const lines = prompt.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-  const listLines = lines.filter(line => /^[-*+]\s+|\d+[.)]\s+/.test(line));
-  return lines.length >= 5 ||
-    listLines.length >= 3 ||
-    /(multi|multiple|several|end-to-end|framework|workflow|architecture|orchestration|复杂|完整|全部|多个|流程|框架|编排)/i.test(prompt);
+function shouldSuggestResearchSubtask(task: TaskState, prd: ReturnType<typeof extractPrd>, complexity: SubtaskComplexity): boolean {
+  return complexity.level === "complex" ||
+    prd.openQuestions.some(isMeaningfulOpenQuestion) ||
+    /(research|investigate|architecture|design|upstream|迁移|兼容|调研|研究|架构|设计|上游)/i.test(task.initialPrompt);
 }
 
 function countExplicitAcceptanceCriteria(prompt: string): number {
@@ -2298,15 +2448,15 @@ function normalizeSubtaskPromptKey(prompt: string): string {
   return prompt.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-function summarizeSubtaskPlan(items: SubtaskPlanItem[], mode: AutoSubtaskMode): string {
-  if (items.length === 0) return "No subtask suggestions generated.";
-  const counts = countSubtaskPlanItems(items);
+function summarizeSubtaskPlan(items: SubtaskPlanItem[], mode: AutoSubtaskMode, complexity: SubtaskComplexity): string {
   const modeText = mode === "auto"
     ? "Auto mode creates suggested child tasks after planning."
     : mode === "suggest"
       ? "Suggest mode records child task proposals for review."
       : "Subtask planning is disabled.";
-  return `${items.length} suggested child task(s). ${counts.created} created, ${counts.suggested} pending review. ${modeText}`;
+  if (items.length === 0) return `No subtask suggestions generated. Complexity: ${complexity.level} (${complexity.score}). ${modeText}`;
+  const counts = countSubtaskPlanItems(items);
+  return `${items.length} suggested child task(s). ${counts.created} created, ${counts.suggested} pending review. Complexity: ${complexity.level} (${complexity.score}). ${modeText}`;
 }
 
 function countSubtaskPlanItems(items: SubtaskPlanItem[]): Record<SubtaskPlanItemStatus, number> {
@@ -2328,6 +2478,10 @@ function shortTaskTitle(input: string): string {
 
 function isAutoSubtaskMode(value: unknown): value is AutoSubtaskMode {
   return value === "off" || value === "suggest" || value === "auto";
+}
+
+function isSubtaskComplexityLevel(value: unknown): value is SubtaskComplexityLevel {
+  return value === "simple" || value === "moderate" || value === "complex";
 }
 
 function isSubtaskPlanItemStatus(value: unknown): value is SubtaskPlanItemStatus {
@@ -2406,6 +2560,7 @@ export async function recordToolEvent(
         toolName: data.toolName,
         toolCallId: data.toolCallId,
       },
+      subtaskMode: await readProjectAutoSubtaskMode(root),
     });
     await appendTaskEvent(root, task.id, {
       type: "task_inferred",

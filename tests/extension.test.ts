@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import projectFlowExtension from "../src/index";
@@ -332,6 +332,42 @@ describe("project flow extension", () => {
       expect(plan?.items.some(item => item.status === "created")).toBe(true);
       const active = await loadActiveTask(root);
       expect(active?.id).toBe(task.id);
+    });
+  });
+
+  test("uses project subtask mode setting on automatic task creation", async () => {
+    await withTempProject(async root => {
+      await mkdir(path.join(root, ".omp"), { recursive: true });
+      await writeFile(path.join(root, ".omp", "plugin-overrides.json"), JSON.stringify({
+        settings: {
+          "omp-project-flow": {
+            autoSubtaskMode: "auto",
+          },
+        },
+      }, null, 2));
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0];
+      await beforeAgentStart?.(
+        {
+          type: "before_agent_start",
+          prompt: [
+            "implement configured automatic subtask planning",
+            "- Acceptance: generate subtask suggestions",
+            "- Acceptance: create child tasks automatically",
+            "- Acceptance: preserve parent task as active",
+          ].join("\n"),
+          systemPrompt: [],
+        },
+        fake.ctx(root),
+      );
+
+      const active = await loadActiveTask(root);
+      expect(active).toBeDefined();
+      const plan = await readSubtaskPlan(root, active!.id);
+      expect(plan?.mode).toBe("auto");
+      expect(plan?.items.some(item => item.status === "created" && !!item.childTaskId)).toBe(true);
     });
   });
 
