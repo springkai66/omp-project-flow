@@ -632,6 +632,10 @@ describe("project flow extension", () => {
         summary: "failed assertion",
       });
 
+      await fake.commands.get("verify:remediate").handler("--next", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("open next actions");
+      expect(fake.notifications.at(-1)?.message).toContain("test:1");
+
       await fake.commands.get("verify:remediate").handler("--start first attempt", fake.ctx(root));
       expect(fake.notifications.at(-1)?.message).toContain("active");
       const plan = await readVerificationRemediationPlan(root, task.id);

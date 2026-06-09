@@ -10,7 +10,7 @@ Project Flow 是一个面向 Oh My Pi 的项目工作流、任务状态和规范
 
 - 持久化项目规范
 - 可审阅的规范提案
-- 任务 PRD，并自动提取目标、约束、验收条件和开放问题
+- 任务 PRD review snapshot：结构化目标、范围、非目标、验收、决策、完整性检查、计划质量检查和 promotion readiness
 - 稳定任务 metadata：source、kind、priority、risk、labels、origin 和关系字段
 - 父子 subtask tree，并汇总子任务 readiness
 - 一问一答式 PRD 澄清流程
@@ -68,7 +68,7 @@ omp plugin list
 当用户提示看起来像代码工作时，扩展会自动：
 
 1. 创建或恢复 active task
-2. 写入 `.project-flow/tasks/<task-id>/prd.md`
+2. 写入 `.project-flow/tasks/<task-id>/prd.md` 和 `prd-review.{json,md}`
 3. 在 `task.json` 内保存稳定任务 metadata
 4. 在 metadata 中追踪父子任务关系
 5. 当 PRD 存在开放问题时创建 `clarification.json` 和 `clarification.md`
@@ -123,6 +123,7 @@ omp plugin list
 /clarify:skip [reason]
 /clarify:finish [--force] [note]
 /prd:refine [id-prefix-or-title] [--axes a,b] [--max N]
+/prd:review [--refresh] [id-prefix-or-title]
 /research:status [id-prefix-or-title]
 /research:add <note>
 /plan:status [id-prefix-or-title]
@@ -133,7 +134,7 @@ omp plugin list
 /verify:status [id-prefix-or-title]
 /verify:suggest [id-prefix-or-title]
 /verify:refresh [id-prefix-or-title]
-/verify:remediate [--refresh|--start|--pass|--fail|--stop] [id-prefix-or-title] [note]
+/verify:remediate [--refresh|--next|--start|--pass|--fail|--stop] [id-prefix-or-title] [note]
 /acceptance:status [id-prefix-or-title]
 /acceptance:done <id> [evidence]
 /acceptance:block <id> [reason]
@@ -156,6 +157,8 @@ Subtask 规划策略由 `autoSubtaskMode` 插件设置控制：`off` 禁用新 r
 Role orchestration handoff 会写入每个任务的 `roles/` 目录。`/task:roles` 查看 research/implement/check 所有权计划，`/task:roles --refresh` 按当前任务状态重新生成 prompts，`/task:roles --start|--done|--block <role> [note]` 记录角色进度，同时仍由主 OMP runtime 控制执行。
 
 当初始 PRD 有开放问题时，clarification 会自动进入一问一答流程。必需澄清仍在 collecting 时，下一条普通用户输入会被记录为当前问题答案，隐藏上下文会要求 agent 只问下一题，暂不进入计划或实现。日常使用 `/task:clarify` 即可；`/task:clarify --refine` 或 `/prd:refine` 会围绕 goal/scope/users/acceptance/constraints/non-goals/verification/risk 运行聚焦 PRD refinement；需要显式控制时可以用 `/clarify:*` 系列命令。
+
+PRD review artifacts 与每个任务 PRD 同目录，文件名为 `prd-review.json` 和 `prd-review.md`。它们记录 goal、scope、actors/users、non-goals、constraints、acceptance、verification、risks、dependencies、open questions、research-backed decisions、PRD completeness checks、acceptance-to-plan coverage、verification coverage 和 promotion readiness。使用 `/prd:review` 查看 gate，或用 `/prd:review --refresh` 从当前任务 artifacts 重新生成。Promotion blockers 会进入 finish readiness；warnings 保持可审阅，但不会静默扩张范围。
 
 上游命令用于 ECC 或 OMO 升级后的受控同步。它们会刷新本地同步报告、标记某个上游版本已审，或创建一个普通 Project Flow 任务来适配有价值的方案。
 
@@ -182,6 +185,8 @@ Role orchestration handoff 会写入每个任务的 `roles/` 目录。`/task:rol
     T-YYYYMMDD-slug/
       task.json
       prd.md
+      prd-review.json
+      prd-review.md
       clarification.json
       clarification.md
       info.md
@@ -227,7 +232,7 @@ Role orchestration 会记录 research、implementation、verification/review 的
 
 Research artifacts 位于每个 task 的 `research/` 目录下。普通 notes 仍在 `research/notes.md`，reviewed/draft evidence 写入 `research/source-packs.json`，本地 research workflow handoff 写入 `research/handoff.md`。Source pack 包含 kind、source path/URL、claim、excerpt、confidence、review status、question links、stale-after metadata 和 open risks。使用 `/research:question`、`/research:extract-source --source <file[:start-end]> --claim <claim>`、`/research:review --id S1`、`/research:answer --id Q1 --answer <answer> --source-packs S1,S2`、`/research:decision`、`/research:add-source` 和 `/research:summary` 执行 review-first workflow。Upstream/parity task 会对缺少 reviewed evidence、open questions、draft-only packs、stale sources、low confidence 且没有第二来源、conflicts、open research risks 给出 warning；Project Flow 不会伪装成已经自动完成 research。
 
-验证建议会从常见项目文件中推断，例如 `package.json`、`pyproject.toml`、`pytest.ini`、`Cargo.toml`、`go.mod`、`.sln`、`.csproj` 和 `Makefile`。Project Flow 还会把可审阅 verification policy matrix 写入每个 `verification-strategy.json`：触碰文件类别会匹配到建议检查，已记录成功命令会把对应行标记为 covered，readiness/resume pack 会展示剩余 coverage gaps，但不会静默运行命令。当检查失败时，`/verify:remediate` 会创建 opt-in 修复循环，记录失败检查证据、有界 attempts、stop conditions，以及显式 pass/fail/stop 状态。它不会静默运行修复或验证命令；循环只记录 agent/user 选择做什么，以及返回了什么证据。
+验证建议会从常见项目文件中推断，例如 `package.json`、`pyproject.toml`、`pytest.ini`、`Cargo.toml`、`go.mod`、`.sln`、`.csproj` 和 `Makefile`。Project Flow 还会把可审阅 verification policy matrix 写入每个 `verification-strategy.json`：触碰文件类别会匹配到建议检查，已记录成功命令会把对应行标记为 covered，readiness/resume pack 会展示剩余 coverage gaps，但不会静默运行命令。当检查失败时，`/verify:remediate` 会创建 opt-in 修复循环，记录失败检查证据、classification category、confidence、impacted files/signals、结构化 next-action records、本地 `verification-remediation-ledger.jsonl`、有界 attempts、stop conditions，以及显式 pass/fail/stop 状态。使用 `/verify:remediate --next` 可以重新生成可审阅 next actions。它不会静默运行修复或验证命令；rerun command 只会作为需要确认的 opt-in record 保存。
 
 Spec proposal 会保存在 `.project-flow/spec-proposals/` 下供审阅。除非显式运行 `/spec:apply`，它们不会应用到 `.project-flow/spec/`。
 
@@ -257,6 +262,18 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.27.0
+
+- 新增本地 verification failure classification：evidence、confidence、impacted files/signals、retryability 和 stop reasons。
+- Verification remediation 现在写入 structured next-action records 和本地 ledger，但不会静默执行 commands。
+- 新增 `/verify:remediate --next`，用于生成可审阅 next actions。
+
+### 0.26.0
+
+- 新增结构化 PRD review artifacts：completeness checks、plan-quality checks、acceptance-to-plan coverage、decisions 和 promotion readiness。
+- PRD review summary 现在会进入 `info.md`、handoff、snapshot、hidden context 和 finish readiness。
+- 新增 `/prd:review [--refresh]`，用于本地检查 PRD-to-plan gate。
 
 ### 0.25.0
 

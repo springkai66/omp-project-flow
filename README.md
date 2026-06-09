@@ -10,7 +10,7 @@ This plugin provides a native project workflow for agent work:
 
 - durable project specs
 - reviewable spec proposals
-- task PRDs with simple goal, constraint, acceptance, and open-question extraction
+- task PRDs with structured review snapshots, completeness checks, plan-quality checks, decisions, and promotion readiness
 - stable task metadata for source, kind, priority, risk, labels, origin, and relationships
 - parent/child subtask trees with child readiness rollups
 - one-question-at-a-time PRD clarification loops
@@ -68,7 +68,7 @@ You do not need to run commands for the normal path.
 When a user prompt looks like code work, the extension automatically:
 
 1. creates or resumes an active task
-2. writes `.project-flow/tasks/<task-id>/prd.md`
+2. writes `.project-flow/tasks/<task-id>/prd.md` and `prd-review.{json,md}`
 3. stores stable task metadata in `task.json`
 4. tracks parent/child task relationships in metadata
 5. creates `clarification.json` and `clarification.md` when open PRD questions need a one-question loop
@@ -123,6 +123,7 @@ Commands are escape hatches and diagnostics:
 /clarify:skip [reason]
 /clarify:finish [--force] [note]
 /prd:refine [id-prefix-or-title] [--axes a,b] [--max N]
+/prd:review [--refresh] [id-prefix-or-title]
 /research:status [id-prefix-or-title]
 /research:add <note>
 /plan:status [id-prefix-or-title]
@@ -133,7 +134,7 @@ Commands are escape hatches and diagnostics:
 /verify:status [id-prefix-or-title]
 /verify:suggest [id-prefix-or-title]
 /verify:refresh [id-prefix-or-title]
-/verify:remediate [--refresh|--start|--pass|--fail|--stop] [id-prefix-or-title] [note]
+/verify:remediate [--refresh|--next|--start|--pass|--fail|--stop] [id-prefix-or-title] [note]
 /acceptance:status [id-prefix-or-title]
 /acceptance:done <id> [evidence]
 /acceptance:block <id> [reason]
@@ -156,6 +157,8 @@ Subtask planning policy is controlled by the `autoSubtaskMode` plugin setting: `
 Role orchestration handoffs are generated under each task's `roles/` directory. `/task:roles` shows the research/implement/check ownership plan, `/task:roles --refresh` regenerates prompts from current task state, and `/task:roles --start|--done|--block <role> [note]` records role progress while keeping the main OMP runtime in control.
 
 Clarification is automatic when the initial PRD has open questions. While a required clarification loop is collecting, the next normal user reply is recorded as the current answer, and the injected context tells the agent to ask only the next question before planning or implementing. Use `/task:clarify` for the compact command surface, `/task:clarify --refine` or `/prd:refine` for a focused PRD refinement loop over goal/scope/users/acceptance/constraints/non-goals/verification/risk, or `/clarify:*` when you want explicit start/status/answer/skip/finish control.
+
+PRD review artifacts live next to each task PRD as `prd-review.json` and `prd-review.md`. They record goal, scope, actors/users, non-goals, constraints, acceptance, verification, risks, dependencies, open questions, research-backed decisions, PRD completeness checks, acceptance-to-plan coverage, verification coverage, and a promotion readiness state. Use `/prd:review` to inspect the gate or `/prd:review --refresh` to regenerate it from current task artifacts. Promotion blockers flow into finish readiness; warnings remain reviewable without silently expanding scope.
 
 The upstream commands are for controlled upgrades when ECC or OMO changes. They refresh the local sync report, mark reviewed upstream references, or create a normal Project Flow task to adapt useful ideas.
 
@@ -182,6 +185,8 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
     T-YYYYMMDD-slug/
       task.json
       prd.md
+      prd-review.json
+      prd-review.md
       clarification.json
       clarification.md
       info.md
@@ -227,7 +232,7 @@ Role orchestration records role prompts, owned artifacts, expected outputs, and 
 
 Research artifacts live under each task's `research/` directory. Notes remain in `research/notes.md`, reviewed/draft evidence is captured in `research/source-packs.json`, and the local research workflow handoff is written to `research/handoff.md`. Source packs include kind, source path/URL, claim, excerpt, confidence, review status, question links, stale-after metadata, and open risks. Use `/research:question`, `/research:extract-source --source <file[:start-end]> --claim <claim>`, `/research:review --id S1`, `/research:answer --id Q1 --answer <answer> --source-packs S1,S2`, `/research:decision`, `/research:add-source`, and `/research:summary` to run a review-first workflow. Upstream/parity tasks warn on missing reviewed evidence, open questions, draft-only packs, stale sources, low confidence without a second source, conflicts, and open research risks; Project Flow does not pretend autonomous research happened.
 
-Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`. Project Flow also writes a reviewable verification policy matrix into each `verification-strategy.json`: touched-file categories are matched to suggested checks, successful recorded commands mark rows covered, and readiness/resume packs surface remaining coverage gaps without running commands silently. When checks fail, `/verify:remediate` creates an opt-in loop with failed check evidence, bounded attempts, stop conditions, and explicit pass/fail/stop status. It never runs fix or verification commands silently; the loop records what the agent/user chose to do and what evidence came back.
+Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`. Project Flow also writes a reviewable verification policy matrix into each `verification-strategy.json`: touched-file categories are matched to suggested checks, successful recorded commands mark rows covered, and readiness/resume packs surface remaining coverage gaps without running commands silently. When checks fail, `/verify:remediate` creates an opt-in loop with failed-check evidence, classification category, confidence, impacted files/signals, structured next-action records, a local `verification-remediation-ledger.jsonl`, bounded attempts, stop conditions, and explicit pass/fail/stop status. Use `/verify:remediate --next` to regenerate reviewable next actions. It never runs fix or verification commands silently; rerun commands are stored as opt-in records with confirmation requirements.
 
 Spec proposals are saved for review under `.project-flow/spec-proposals/`. They are not applied to `.project-flow/spec/` unless you explicitly run `/spec:apply`.
 
@@ -257,6 +262,18 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.27.0
+
+- Added local verification failure classification with evidence, confidence, impacted files/signals, retryability, and stop reasons.
+- Verification remediation now writes structured next-action records and a local ledger without silently executing commands.
+- Added `/verify:remediate --next` for reviewable next-action generation.
+
+### 0.26.0
+
+- Added structured PRD review artifacts with completeness checks, plan-quality checks, acceptance-to-plan coverage, decisions, and promotion readiness.
+- PRD review summaries now flow into `info.md`, handoffs, snapshots, hidden context, and finish readiness.
+- Added `/prd:review [--refresh]` for local PRD-to-plan gate inspection.
 
 ### 0.25.0
 

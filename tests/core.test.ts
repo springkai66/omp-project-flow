@@ -29,6 +29,7 @@ import {
   loadTask,
   readProjectOverview,
   readProjectAutoSubtaskMode,
+  readPrdReview,
   readPlan,
   readAcceptance,
   refreshSubtaskPlanArtifacts,
@@ -72,6 +73,7 @@ import {
   writeTaskReadiness,
   writeTaskResume,
   writeTaskSnapshot,
+  writePrdReview,
   writeUpstreamSyncReport,
   formatTaskMetadataSummary,
   formatSubtaskPlanSummary,
@@ -567,6 +569,70 @@ describe("project flow core", () => {
     });
   });
 
+  test("writes PRD review artifacts and flows promotion summaries", async () => {
+    await withTempProject(async root => {
+      const paths = await ensureProject(root);
+      const task = await createTask(
+        root,
+        [
+          "implement local PRD promotion gate",
+          "Scope: task PRD review artifacts and readiness gates",
+          "Actors: maintainers using Project Flow before implementation",
+          "Non-goal: do not launch autonomous agents",
+          "Must keep local artifacts reviewable",
+          "- Acceptance: PRD review records completeness and plan quality",
+          "- Acceptance: promotion summaries flow into handoff and context",
+          "Verification: run bun test tests/core.test.ts",
+          "Risk: stale plan coverage can hide missing acceptance",
+          "Dependencies: existing acceptance and plan artifacts",
+        ].join("\n"),
+      );
+
+      const review = await readPrdReview(root, task.id);
+      expect(review?.prd.goal).toContain("implement local PRD promotion gate");
+      expect(review?.prd.scope[0]).toContain("Scope:");
+      expect(review?.prd.users[0]).toContain("Actors:");
+      expect(review?.prd.nonGoals[0]).toContain("Non-goal:");
+      expect(review?.prd.verification[0]).toContain("Verification:");
+      expect(review?.prd.risks[0]).toContain("Risk:");
+      expect(review?.prd.dependencies[0]).toContain("Dependencies:");
+      expect(review?.completeness.blockers).toHaveLength(0);
+      expect(review?.planReview.coverage.map(item => item.status)).not.toContain("missing");
+      expect(review?.promotion.ready).toBe(true);
+
+      const reviewMd = await readFile(path.join(paths.tasksDir, task.id, "prd-review.md"), "utf8");
+      expect(reviewMd).toContain("## Plan Quality Checks");
+      expect(reviewMd).toContain("### Acceptance-To-Plan Coverage");
+
+      const readiness = await writeTaskReadiness(root, task, "test");
+      expect(readiness.passes.join("\n")).toContain("PRD/plan promotion gate ready");
+
+      await addTaskResearchDecision(
+        root,
+        task.id,
+        "Use local promotion gate",
+        "It keeps PRD and plan readiness deterministic without pretending autonomous agents exist.",
+      );
+      const refreshed = await writePrdReview(root, task, "test");
+      expect(refreshed.decisions[0]?.decision).toBe("Use local promotion gate");
+
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("## PRD Review");
+      expect(info).toContain("Use local promotion gate");
+
+      const handoff = await readTaskHandoff(root, task.id);
+      expect(handoff).toContain("## PRD Review");
+      expect(handoff).toContain("Use local promotion gate");
+
+      const snapshot = await writeTaskSnapshot(root, task, "test");
+      expect(snapshot.prdReview?.decisions[0]?.decision).toBe("Use local promotion gate");
+      const bundle = await buildContextBundle(root, "continue local PRD promotion gate", task);
+      expect(bundle.prdReview?.promotion.ready).toBe(true);
+      expect(bundle.content).toContain("PRD review:");
+      expect(bundle.content).toContain("Use local promotion gate");
+    });
+  });
+
   test("creates acceptance state and handoff summaries", async () => {
     await withTempProject(async root => {
       const paths = await ensureProject(root);
@@ -923,7 +989,7 @@ describe("project flow core", () => {
 
   test("builds an opt-in remediation plan from failed verification", async () => {
     await withTempProject(async root => {
-      await ensureProject(root);
+      const paths = await ensureProject(root);
       const task = await createTask(root, "fix failed verification loop\n- Acceptance: plan remediation attempts");
       await recordVerification(root, task.id, {
         id: "fail-1",
@@ -938,9 +1004,39 @@ describe("project flow core", () => {
       expect(plan.status).toBe("planned");
       expect(plan.maxAttempts).toBe(3);
       expect(plan.failedChecks[0]?.command).toBe("bun test");
+      expect(plan.failedChecks[0]?.classification?.category).toBe("test");
+      expect(plan.failedChecks[0]?.classification?.confidence).toBe("high");
+      expect(plan.failedChecks[0]?.classification?.signals.join("\n")).toContain("assertion failed");
+      expect(plan.nextActionRecords.some(action => action.kind === "rerun" && action.command === "bun test" && action.requiresConfirmation)).toBe(true);
       expect(plan.nextActions.some(action => action.includes("rerun"))).toBe(true);
       const stored = await readVerificationRemediationPlan(root, task.id);
-      expect(stored?.summary).toContain("1 failed check");
+      expect(stored?.summary).toContain("categories test:1");
+      expect(await readFile(path.join(paths.tasksDir, task.id, "verification-remediation.md"), "utf8")).toContain("## Failure Classifications");
+      expect(await readFile(path.join(paths.tasksDir, task.id, "verification-remediation-ledger.jsonl"), "utf8")).toContain("plan_persisted");
+      const readiness = await writeTaskReadiness(root, task, "test");
+      expect(readiness.warnings.join("\n")).toContain("Verification remediation pending");
+      expect(readiness.nextActions.join("\n")).toContain("opt-in");
+    });
+  });
+
+  test("classifies missing verification commands as explicit blockers", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "classify missing verification command");
+      await recordVerification(root, task.id, {
+        id: "missing-command",
+        timestamp: "2026-06-09T00:00:00.000Z",
+        toolName: "bash",
+        command: "pnpm test",
+        success: false,
+        summary: "pnpm: command not found",
+      });
+
+      const plan = await writeVerificationRemediationPlan(root, task, "test");
+      expect(plan.failedChecks[0]?.classification?.category).toBe("command_unavailable");
+      expect(plan.failedChecks[0]?.classification?.retryable).toBe(false);
+      expect(plan.nextActionRecords.some(action => action.kind === "ask_user" && action.requiresConfirmation)).toBe(true);
+      expect(plan.nextActions.join("\n")).toContain("not auto-run");
     });
   });
 

@@ -121,6 +121,7 @@ export interface ContextBundle {
   resume?: ResumeState;
   readiness?: ReadinessState;
   snapshot?: TaskSnapshot;
+  prdReview?: PrdReviewState;
   subtasks?: string;
   subtaskPlan?: SubtaskPlan;
   research?: ResearchState;
@@ -188,6 +189,7 @@ export interface TaskSnapshot {
   subtasks?: string;
   subtaskPlan?: SubtaskPlan;
   research?: ResearchState;
+  prdReview?: PrdReviewState;
   roles?: RoleOrchestrationPlan;
   info?: string;
   handoff?: string;
@@ -622,6 +624,24 @@ export interface VerificationStrategy {
 
 export type VerificationRemediationStatus = "not_required" | "planned" | "active" | "resolved" | "stopped";
 export type VerificationRemediationAttemptStatus = "in_progress" | "passed" | "failed" | "stopped";
+export type VerificationFailureCategory = "build" | "typecheck" | "lint" | "test" | "command_unavailable" | "timeout" | "environment" | "external_blocker" | "flaky" | "coverage_gap" | "unknown";
+export type VerificationFailureConfidence = "high" | "medium" | "low";
+export type VerificationRemediationNextActionKind = "inspect" | "fix" | "rerun" | "record" | "ask_user" | "stop";
+export type VerificationRemediationNextActionStatus = "open" | "done" | "blocked";
+
+export interface VerificationFailureClassification {
+  category: VerificationFailureCategory;
+  confidence: VerificationFailureConfidence;
+  evidence: string;
+  signals: string[];
+  impactedFiles: string[];
+  suspectedCause: string;
+  nextAction: string;
+  retryable: boolean;
+  source: string;
+  requiresOptInCommand?: string;
+  stopReason?: string;
+}
 
 export interface VerificationRemediationFailedCheck {
   id: string;
@@ -629,6 +649,19 @@ export interface VerificationRemediationFailedCheck {
   command?: string;
   toolName: string;
   summary?: string;
+  classification?: VerificationFailureClassification;
+}
+
+export interface VerificationRemediationNextAction {
+  id: string;
+  kind: VerificationRemediationNextActionKind;
+  text: string;
+  status: VerificationRemediationNextActionStatus;
+  createdAt: string;
+  source: string;
+  checkId?: string;
+  command?: string;
+  requiresConfirmation?: boolean;
 }
 
 export interface VerificationRemediationAttempt {
@@ -652,6 +685,7 @@ export interface VerificationRemediationPlan {
   summary: string;
   failedChecks: VerificationRemediationFailedCheck[];
   nextActions: string[];
+  nextActionRecords: VerificationRemediationNextAction[];
   stopConditions: string[];
   attempts: VerificationRemediationAttempt[];
 }
@@ -705,6 +739,75 @@ export interface PlanUpdateResult {
   state: PlanState;
   step?: PlanStep;
   matches: PlanStep[];
+}
+
+export type PrdWorkflowStage = "draft" | "needs-clarification" | "ready-to-plan" | "plan-review" | "ready-to-implement" | "implementing";
+export type PrdReviewSeverity = "blocker" | "warning" | "pass";
+export type PrdReviewCategory = "prd" | "acceptance" | "plan" | "verification" | "research" | "decision" | "promotion";
+
+export interface PrdReviewIssue {
+  id: string;
+  severity: Exclude<PrdReviewSeverity, "pass">;
+  category: PrdReviewCategory;
+  message: string;
+  nextAction: string;
+  relatedIds: string[];
+}
+
+export interface PrdSnapshot {
+  goal: string;
+  scope: string[];
+  users: string[];
+  nonGoals: string[];
+  constraints: string[];
+  acceptanceCriteria: string[];
+  verification: string[];
+  risks: string[];
+  dependencies: string[];
+  openQuestions: string[];
+}
+
+export interface PrdDecisionEntry {
+  id: string;
+  decision: string;
+  rationale: string;
+  alternatives: string[];
+  sourcePackIds: string[];
+  createdAt: string;
+}
+
+export interface AcceptancePlanCoverage {
+  acceptanceId: string;
+  acceptanceText: string;
+  planStepIds: string[];
+  status: "covered" | "generic" | "missing";
+}
+
+export interface PrdReviewState {
+  taskId: string;
+  updatedAt: string;
+  generatedFrom?: string;
+  stage: PrdWorkflowStage;
+  prd: PrdSnapshot;
+  decisions: PrdDecisionEntry[];
+  completeness: {
+    blockers: PrdReviewIssue[];
+    warnings: PrdReviewIssue[];
+    passes: string[];
+  };
+  planReview: {
+    coverage: AcceptancePlanCoverage[];
+    blockers: PrdReviewIssue[];
+    warnings: PrdReviewIssue[];
+    passes: string[];
+  };
+  promotion: {
+    ready: boolean;
+    blockers: PrdReviewIssue[];
+    warnings: PrdReviewIssue[];
+    nextActions: string[];
+    promotedAt?: string;
+  };
 }
 
 export type SpecProposalStatus = "proposed" | "applied" | "rejected";
@@ -2026,19 +2129,20 @@ export async function writeTaskInfo(
   root: string,
   task: TaskState,
   reason = "update",
-  options: { force?: boolean; refreshSubtasks?: boolean; refreshRoles?: boolean; refreshRemediation?: boolean } = {},
+  options: { force?: boolean; refreshSubtasks?: boolean; refreshRoles?: boolean; refreshRemediation?: boolean; refreshPrdReview?: boolean } = {},
 ): Promise<string> {
   const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
   await mkdir(taskDir, { recursive: true });
   const infoPath = path.join(taskDir, "info.md");
   const existing = await readTaskInfo(root, task.id);
   const currentTask = await loadTask(root, task.id) || task;
-  if (existing !== undefined && !options.force && (options.refreshSubtasks || options.refreshRoles || options.refreshRemediation)) {
+  const prdReview = await writePrdReview(root, currentTask, reason);
+  if (existing !== undefined && !options.force && (options.refreshSubtasks || options.refreshRoles || options.refreshRemediation || options.refreshPrdReview)) {
     const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
     const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
     const roles = await readRoleOrchestration(root, currentTask.id);
     const remediation = await readVerificationRemediationPlan(root, currentTask.id);
-    const content = updateTaskInfoGeneratedSections(existing, subtaskSummary, subtaskPlan, roles, remediation);
+    const content = updateTaskInfoGeneratedSections(existing, subtaskSummary, subtaskPlan, prdReview, roles, remediation);
     await writeFile(infoPath, content, "utf8");
     return content;
   }
@@ -2054,22 +2158,26 @@ export async function writeTaskInfo(
   const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
   const roles = await readRoleOrchestration(root, currentTask.id);
   const remediation = await readVerificationRemediationPlan(root, currentTask.id);
-  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, subtaskPlan, roles, remediation, reason);
+  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, subtaskPlan, roles, remediation, prdReview, reason);
   await writeFile(infoPath, content, "utf8");
   return content;
 }
 
-function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string, subtaskPlan: SubtaskPlan | undefined, roles?: RoleOrchestrationPlan, remediation?: VerificationRemediationPlan): string {
+function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string, subtaskPlan: SubtaskPlan | undefined, prdReview: PrdReviewState, roles?: RoleOrchestrationPlan, remediation?: VerificationRemediationPlan): string {
+  let next = updateTaskInfoSection(content, "PRD Review", formatPrdReviewSummary(prdReview, 12));
+  next = updateTaskInfoSection(next, "Subtasks", subtaskSummary);
+  next = updateTaskInfoSection(
+    next,
+    "Subtask Plan",
+    subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
+  );
+  next = updateTaskInfoSection(
+    next,
+    "Role Orchestration",
+    roles ? formatRoleOrchestrationSummary(roles, 3) : "No role orchestration plan recorded yet.",
+  );
   return updateTaskInfoSection(
-    updateTaskInfoSection(
-      updateTaskInfoSection(
-        updateTaskInfoSection(content, "Subtasks", subtaskSummary),
-        "Subtask Plan",
-        subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
-      ),
-      "Role Orchestration",
-      roles ? formatRoleOrchestrationSummary(roles, 3) : "No role orchestration plan recorded yet.",
-    ),
+    next,
     "Verification Remediation",
     remediation ? formatVerificationRemediationSummary(remediation) : "No verification remediation loop recorded yet.",
   );
@@ -2459,6 +2567,7 @@ export async function createTask(root: string, prompt: string, options: CreateTa
   await refreshVerificationStrategy(root, id);
   await writeInitialTaskResearch(root, task, prd, now);
   await writeClarificationFiles(root, task, clarification);
+  await writePrdReview(root, task, "created");
   const subtaskMode = options.subtaskMode || DEFAULT_AUTO_SUBTASK_MODE;
   if (subtaskMode !== "off" && !task.metadata.relationships.parentTaskId) {
     const subtaskPlan = await writeSubtaskPlan(root, task, subtaskMode, "created", { prd });
@@ -3827,9 +3936,10 @@ export async function writeVerificationRemediationPlan(root: string, task: TaskS
   const currentTask = await loadTask(root, task.id) || task;
   const existing = await readVerificationRemediationPlan(root, currentTask.id);
   const verification = await readVerification(root, currentTask.id);
-  const failedChecks = verification.checks.filter(check => !check.success).slice(-8).map(toRemediationFailedCheck);
+  const failedChecks = verification.checks.filter(check => !check.success).slice(-8).map(check => toRemediationFailedCheck(check, verification.checks));
   const attempts = existing?.attempts || [];
   const now = new Date().toISOString();
+  const nextActionRecords = buildRemediationNextActionRecords(failedChecks, now);
   const plan = normalizeVerificationRemediationPlan({
     taskId: currentTask.id,
     status: deriveRemediationStatus(failedChecks, attempts, maxAttempts),
@@ -3839,7 +3949,8 @@ export async function writeVerificationRemediationPlan(root: string, task: TaskS
     maxAttempts,
     summary: summarizeVerificationRemediation(failedChecks, attempts, maxAttempts),
     failedChecks,
-    nextActions: buildRemediationNextActions(failedChecks),
+    nextActions: buildRemediationNextActions(nextActionRecords),
+    nextActionRecords,
     stopConditions: buildRemediationStopConditions(maxAttempts),
     attempts,
   }) || {
@@ -3852,6 +3963,7 @@ export async function writeVerificationRemediationPlan(root: string, task: TaskS
     summary: "No failed verification checks require remediation.",
     failedChecks: [],
     nextActions: [],
+    nextActionRecords: [],
     stopConditions: buildRemediationStopConditions(maxAttempts),
     attempts: [],
   };
@@ -3948,11 +4060,19 @@ export function formatVerificationRemediationPlan(plan: VerificationRemediationP
     "",
     "## Failed Checks",
     "",
-    plan.failedChecks.length > 0 ? plan.failedChecks.map(check => `- ${check.id}: ${check.command || check.toolName}${check.summary ? ` - ${summarizeUnknown(check.summary, 180)}` : ""}`).join("\n") : "No failed checks recorded.",
+    plan.failedChecks.length > 0 ? plan.failedChecks.map(formatRemediationFailedCheck).join("\n") : "No failed checks recorded.",
+    "",
+    "## Failure Classifications",
+    "",
+    plan.failedChecks.length > 0 ? plan.failedChecks.map(formatRemediationClassification).join("\n") : "No failure classifications recorded.",
     "",
     "## Next Actions",
     "",
     formatResumeList(plan.nextActions, "No next remediation actions recorded."),
+    "",
+    "## Next Action Records",
+    "",
+    plan.nextActionRecords.length > 0 ? plan.nextActionRecords.map(formatRemediationNextAction).join("\n") : "No structured next actions recorded.",
     "",
     "## Stop Conditions",
     "",
@@ -3966,7 +4086,10 @@ export function formatVerificationRemediationPlan(plan: VerificationRemediationP
 }
 
 export function formatVerificationRemediationSummary(plan: VerificationRemediationPlan): string {
-  return `remediation: ${plan.status}, ${plan.failedChecks.length} failed check(s), attempts ${plan.attempts.length}/${plan.maxAttempts}`;
+  const categories = remediationCategoryCounts(plan.failedChecks);
+  const categorySummary = categories.length > 0 ? ` categories ${categories.join(",")}` : "";
+  const openActions = plan.nextActionRecords.filter(action => action.status === "open").length;
+  return `remediation: ${plan.status}, ${plan.failedChecks.length} failed check(s), attempts ${plan.attempts.length}/${plan.maxAttempts}, open next actions ${openActions}${categorySummary}`;
 }
 
 async function persistUpdatedVerificationRemediationPlan(root: string, task: TaskState, plan: VerificationRemediationPlan, reason: string): Promise<VerificationRemediationPlan> {
@@ -3980,6 +4103,7 @@ async function persistVerificationRemediationPlan(root: string, task: TaskState,
   await mkdir(taskDir, { recursive: true });
   await writeFile(path.join(taskDir, "verification-remediation.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8");
   await writeFile(path.join(taskDir, "verification-remediation.md"), formatVerificationRemediationPlan(plan), "utf8");
+  await appendFile(path.join(taskDir, "verification-remediation-ledger.jsonl"), `${JSON.stringify({ at: plan.updatedAt, kind: "plan_persisted", status: plan.status, failedChecks: plan.failedChecks.length, categories: remediationCategoryCounts(plan.failedChecks), openNextActions: plan.nextActionRecords.filter(action => action.status === "open").length })}\n`, "utf8");
 }
 
 function normalizeVerificationRemediationPlan(value: Partial<VerificationRemediationPlan> | undefined): VerificationRemediationPlan | undefined {
@@ -3987,6 +4111,7 @@ function normalizeVerificationRemediationPlan(value: Partial<VerificationRemedia
   const maxAttempts = typeof value.maxAttempts === "number" && Number.isFinite(value.maxAttempts) ? Math.max(1, Math.min(10, Math.round(value.maxAttempts))) : 3;
   const failedChecks = Array.isArray(value.failedChecks) ? value.failedChecks.map(normalizeRemediationFailedCheck).filter((check): check is VerificationRemediationFailedCheck => !!check).slice(0, 8) : [];
   const attempts = Array.isArray(value.attempts) ? value.attempts.map(normalizeRemediationAttempt).filter((attempt): attempt is VerificationRemediationAttempt => !!attempt).slice(0, maxAttempts) : [];
+  const nextActionRecords = Array.isArray(value.nextActionRecords) ? value.nextActionRecords.map(normalizeRemediationNextAction).filter((action): action is VerificationRemediationNextAction => !!action).slice(0, 16) : [];
   const status = isVerificationRemediationStatus(value.status) ? value.status : deriveRemediationStatus(failedChecks, attempts, maxAttempts);
   return {
     taskId: value.taskId,
@@ -3997,7 +4122,8 @@ function normalizeVerificationRemediationPlan(value: Partial<VerificationRemedia
     maxAttempts,
     summary: typeof value.summary === "string" && value.summary.trim() ? value.summary : summarizeVerificationRemediation(failedChecks, attempts, maxAttempts),
     failedChecks,
-    nextActions: normalizeStringArray(value.nextActions).slice(0, 8),
+    nextActions: normalizeStringArray(value.nextActions).length > 0 ? normalizeStringArray(value.nextActions).slice(0, 12) : buildRemediationNextActions(nextActionRecords),
+    nextActionRecords,
     stopConditions: normalizeStringArray(value.stopConditions).slice(0, 8),
     attempts,
   };
@@ -4013,6 +4139,7 @@ function normalizeRemediationFailedCheck(value: unknown): VerificationRemediatio
     toolName: record.toolName,
     command: typeof record.command === "string" && record.command.trim() ? record.command.trim() : undefined,
     summary: typeof record.summary === "string" && record.summary.trim() ? record.summary.trim() : undefined,
+    classification: normalizeVerificationFailureClassification(record.classification),
   };
 }
 
@@ -4032,13 +4159,14 @@ function normalizeRemediationAttempt(value: unknown): VerificationRemediationAtt
   };
 }
 
-function toRemediationFailedCheck(check: VerificationCheck): VerificationRemediationFailedCheck {
+function toRemediationFailedCheck(check: VerificationCheck, allChecks: VerificationCheck[]): VerificationRemediationFailedCheck {
   return {
     id: check.id,
     timestamp: check.timestamp,
     toolName: check.toolName,
     command: check.command,
     summary: check.summary,
+    classification: classifyVerificationFailure(check, allChecks),
   };
 }
 
@@ -4050,33 +4178,232 @@ function deriveRemediationStatus(failedChecks: VerificationRemediationFailedChec
   return "planned";
 }
 
-function buildRemediationNextActions(failedChecks: VerificationRemediationFailedCheck[]): string[] {
-  if (failedChecks.length === 0) return [];
-  const commands = dedupeStrings(failedChecks.map(check => check.command).filter((command): command is string => !!command));
-  return [
-    "Inspect the latest failed check output and affected files before editing.",
-    "Apply the smallest source fix that addresses the failure cause; do not suppress the check.",
-    commands.length > 0 ? `After the fix, rerun: ${commands.join(" && ")}` : "After the fix, rerun the failed verification command.",
-    "Record the attempt result with /verify:remediate --pass or --fail and include evidence.",
-  ];
+function normalizeRemediationNextAction(value: unknown): VerificationRemediationNextAction | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || !isVerificationRemediationNextActionKind(record.kind) || typeof record.text !== "string" || !isVerificationRemediationNextActionStatus(record.status) || typeof record.createdAt !== "string" || typeof record.source !== "string") return undefined;
+  return {
+    id: record.id,
+    kind: record.kind,
+    text: record.text,
+    status: record.status,
+    createdAt: record.createdAt,
+    source: record.source,
+    checkId: typeof record.checkId === "string" ? record.checkId : undefined,
+    command: typeof record.command === "string" && record.command.trim() ? record.command.trim() : undefined,
+    requiresConfirmation: record.requiresConfirmation === true,
+  };
+}
+
+function normalizeVerificationFailureClassification(value: unknown): VerificationFailureClassification | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (!isVerificationFailureCategory(record.category) || !isVerificationFailureConfidence(record.confidence) || typeof record.evidence !== "string" || typeof record.suspectedCause !== "string" || typeof record.nextAction !== "string" || typeof record.source !== "string") return undefined;
+  return {
+    category: record.category,
+    confidence: record.confidence,
+    evidence: record.evidence,
+    signals: normalizeStringArray(record.signals).slice(0, 8),
+    impactedFiles: normalizeStringArray(record.impactedFiles).slice(0, 12),
+    suspectedCause: record.suspectedCause,
+    nextAction: record.nextAction,
+    retryable: record.retryable !== false,
+    source: record.source,
+    requiresOptInCommand: typeof record.requiresOptInCommand === "string" && record.requiresOptInCommand.trim() ? record.requiresOptInCommand.trim() : undefined,
+    stopReason: typeof record.stopReason === "string" && record.stopReason.trim() ? record.stopReason.trim() : undefined,
+  };
+}
+
+function classifyVerificationFailure(check: VerificationCheck, allChecks: VerificationCheck[]): VerificationFailureClassification {
+  const command = check.command || check.toolName;
+  const summary = check.summary || "";
+  const text = `${command}\n${summary}`;
+  const normalized = text.toLowerCase();
+  const laterPass = allChecks.some(candidate => candidate.success && candidate.timestamp > check.timestamp && commandMatchesRecordedCheck(candidate, check));
+  const category: VerificationFailureCategory = laterPass ? "flaky" :
+    /command not found|not recognized|could not find executable|no such file or directory|enoent/.test(normalized) ? "command_unavailable" :
+    /timed? out|timeout|stream stalled|hang|hung/.test(normalized) ? "timeout" :
+    /unauthori[sz]ed|forbidden|permission denied|http_?40[13]|authentication|auth required|network|econnrefused|enotfound|no web search provider/.test(normalized) ? "external_blocker" :
+    /\b(tsc|typecheck|ts\d{3,5}|bun --check|type error)\b/.test(normalized) ? "typecheck" :
+    /\b(eslint|ruff|clippy|golangci-lint|lint|format)\b/.test(normalized) ? "lint" :
+    /\b(test|pytest|cargo test|go test|dotnet test|expect\(|expected|received|assertion|\bfail\b)\b/.test(normalized) ? "test" :
+    /\b(build|compile|bundl(e|er)|vite|webpack)\b/.test(normalized) ? "build" :
+    "unknown";
+  const retryable = category !== "command_unavailable" && category !== "external_blocker" && category !== "environment" && category !== "flaky";
+  return {
+    category,
+    confidence: category === "unknown" ? "low" : laterPass ? "medium" : "high",
+    evidence: summarizeUnknown(summary || command, 360),
+    signals: collectVerificationFailureSignals(summary || command),
+    impactedFiles: extractVerificationFailureFiles(summary),
+    suspectedCause: suspectedCauseForFailureCategory(category),
+    nextAction: nextActionForFailureCategory(category, command),
+    retryable,
+    source: "verification-classifier/v1",
+    requiresOptInCommand: command,
+    stopReason: retryable ? undefined : stopReasonForFailureCategory(category),
+  };
+}
+
+function commandMatchesRecordedCheck(left: VerificationCheck, right: VerificationCheck): boolean {
+  const leftCommand = (left.command || left.toolName).toLowerCase();
+  const rightCommand = (right.command || right.toolName).toLowerCase();
+  return leftCommand === rightCommand || leftCommand.includes(rightCommand) || rightCommand.includes(leftCommand);
+}
+
+function buildRemediationNextActionRecords(failedChecks: VerificationRemediationFailedCheck[], now: string): VerificationRemediationNextAction[] {
+  const actions: VerificationRemediationNextAction[] = [];
+  for (const check of failedChecks) {
+    const classification = check.classification;
+    const source = classification?.source || "verification-classifier/v1";
+    actions.push({
+      id: `VA${actions.length + 1}`,
+      kind: "inspect",
+      text: classification ? classification.nextAction : `Inspect failed check ${check.id} before editing.`,
+      status: "open",
+      createdAt: now,
+      source,
+      checkId: check.id,
+    });
+    if (classification?.stopReason) {
+      actions.push({
+        id: `VA${actions.length + 1}`,
+        kind: "ask_user",
+        text: classification.stopReason,
+        status: "open",
+        createdAt: now,
+        source,
+        checkId: check.id,
+        requiresConfirmation: true,
+      });
+    }
+    if (check.command) {
+      actions.push({
+        id: `VA${actions.length + 1}`,
+        kind: "rerun",
+        text: `After an explicit fix or user-approved retry, rerun: ${check.command}`,
+        status: "open",
+        createdAt: now,
+        source,
+        checkId: check.id,
+        command: check.command,
+        requiresConfirmation: true,
+      });
+    }
+  }
+  if (failedChecks.length > 0) {
+    actions.push({
+      id: `VA${actions.length + 1}`,
+      kind: "record",
+      text: "Record the remediation attempt with /verify:remediate --pass, --fail, or --stop and include evidence.",
+      status: "open",
+      createdAt: now,
+      source: "verification-classifier/v1",
+      requiresConfirmation: false,
+    });
+  }
+  return actions.slice(0, 16);
+}
+
+function buildRemediationNextActions(actions: VerificationRemediationNextAction[]): string[] {
+  return dedupeStrings(actions.filter(action => action.status === "open").map(action => action.command ? `${action.text} (opt-in command; not auto-run)` : action.text)).slice(0, 12);
 }
 
 function buildRemediationStopConditions(maxAttempts: number): string[] {
   return [
     `Stop after ${maxAttempts} failed remediation attempt(s).`,
-    "Stop if the next action requires destructive commands or broad unrelated edits.",
-    "Stop if the failure is flaky or environment-only and record evidence instead of guessing.",
+    "Stop when the same failure signature repeats after a retry; re-read evidence and record the wrong assumption before continuing.",
+    "Stop if the next action requires destructive commands, dependency installation, broad unrelated edits, or architecture changes.",
+    "Stop if the failure is flaky, external-auth, or environment-only; record evidence instead of guessing.",
     "Stop when the failed command passes and mark the attempt with evidence.",
   ];
 }
 
 function summarizeVerificationRemediation(failedChecks: VerificationRemediationFailedCheck[], attempts: VerificationRemediationAttempt[], maxAttempts: number): string {
   if (failedChecks.length === 0) return attempts.some(attempt => attempt.status === "passed") ? "Verification remediation resolved." : "No failed verification checks require remediation.";
-  return `${failedChecks.length} failed check(s), ${attempts.length}/${maxAttempts} remediation attempt(s) recorded.`;
+  const categories = remediationCategoryCounts(failedChecks);
+  return `${failedChecks.length} failed check(s), ${attempts.length}/${maxAttempts} remediation attempt(s) recorded${categories.length > 0 ? `; categories ${categories.join(", ")}` : ""}.`;
+}
+
+function formatRemediationFailedCheck(check: VerificationRemediationFailedCheck): string {
+  const classification = check.classification ? ` [${check.classification.category}/${check.classification.confidence}]` : "";
+  return `- ${check.id}${classification}: ${check.command || check.toolName}${check.summary ? ` - ${summarizeUnknown(check.summary, 180)}` : ""}`;
+}
+
+function formatRemediationClassification(check: VerificationRemediationFailedCheck): string {
+  const classification = check.classification;
+  if (!classification) return `- ${check.id}: no classification recorded.`;
+  return `- ${check.id} [${classification.category}/${classification.confidence}] cause: ${classification.suspectedCause}; files: ${classification.impactedFiles.join(", ") || "none inferred"}; signals: ${classification.signals.join(" | ") || "none"}; next: ${classification.nextAction}${classification.stopReason ? `; stop: ${classification.stopReason}` : ""}`;
+}
+
+function formatRemediationNextAction(action: VerificationRemediationNextAction): string {
+  return `- ${action.id} [${action.status}/${action.kind}] ${action.text}${action.command ? ` command: ${action.command}` : ""}${action.requiresConfirmation ? " (requires confirmation)" : ""}`;
 }
 
 function formatRemediationAttempt(attempt: VerificationRemediationAttempt): string {
   return `- ${attempt.id} [${attempt.status}] ${attempt.commands.join(", ") || "no command"}${attempt.note ? ` - ${attempt.note}` : ""}${attempt.evidence ? `; evidence: ${attempt.evidence}` : ""}`;
+}
+
+function remediationCategoryCounts(failedChecks: VerificationRemediationFailedCheck[]): string[] {
+  const counts = new Map<VerificationFailureCategory, number>();
+  for (const check of failedChecks) {
+    const category = check.classification?.category || "unknown";
+    counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  return [...counts.entries()].map(([category, count]) => `${category}:${count}`);
+}
+
+function collectVerificationFailureSignals(text: string): string[] {
+  return dedupeStrings(text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => /\b(error|fail|failed|timeout|timed out|not found|permission|expected|received|assert|ts\d{3,5}|enoent|econnrefused|forbidden|unauthori[sz]ed)\b/i.test(line))
+    .map(line => summarizeUnknown(line, 180)))
+    .slice(0, 8);
+}
+
+function extractVerificationFailureFiles(text: string): string[] {
+  const files = new Set<string>();
+  for (const match of text.matchAll(/([A-Za-z0-9_.:\/\\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|rs|go|cs|java|kt|swift|cpp|c|h|json|md))(?:[:#](\d+))?/g)) {
+    const file = match[1]?.replaceAll("\\", "/");
+    if (file) files.add(match[2] ? `${file}:${match[2]}` : file);
+  }
+  return [...files].slice(0, 12);
+}
+
+function suspectedCauseForFailureCategory(category: VerificationFailureCategory): string {
+  if (category === "typecheck") return "Typed source or generated API mismatch.";
+  if (category === "test") return "Behavioral regression or failing assertion in the tested path.";
+  if (category === "lint") return "Style, static analysis, or formatter rule violation.";
+  if (category === "build") return "Build/compile pipeline failure.";
+  if (category === "command_unavailable") return "Verification command or toolchain is missing/unavailable.";
+  if (category === "timeout") return "Verification command hung or exceeded its time budget.";
+  if (category === "external_blocker") return "External authorization, network, or provider prerequisite blocked verification.";
+  if (category === "flaky") return "A later matching pass or non-deterministic signal suggests the failure may be flaky or already covered.";
+  if (category === "coverage_gap") return "Required verification coverage is missing.";
+  if (category === "environment") return "Local environment/setup issue.";
+  return "Failure category could not be determined from recorded evidence.";
+}
+
+function nextActionForFailureCategory(category: VerificationFailureCategory, command: string): string {
+  if (category === "typecheck") return "Read the first type error, fix the smallest source/API mismatch, then rerun the recorded typecheck command.";
+  if (category === "test") return "Read the failing assertion and stack trace, fix behavior rather than weakening the test, then rerun the recorded test command.";
+  if (category === "lint") return "Fix the lint/format finding at its source without suppressing the rule, then rerun the recorded lint command.";
+  if (category === "build") return "Inspect build output and fix the smallest compile/config cause before rerunning the build.";
+  if (category === "command_unavailable") return `Resolve or replace unavailable verification command '${command}' before editing product code.`;
+  if (category === "timeout") return "Inspect the hang/timeout, narrow the command or record a blocker; do not stack blind retries.";
+  if (category === "external_blocker") return "Resolve external authorization/network/provider state or record the blocker; do not pretend a source fix can clear it.";
+  if (category === "flaky") return "Confirm the latest matching pass covers the failure; rerun once only if the user/agent explicitly wants fresh evidence.";
+  if (category === "coverage_gap") return "Select and record the missing verification coverage before finish.";
+  if (category === "environment") return "Record the environment prerequisite and fix setup before changing product code.";
+  return "Inspect the failed output and affected files before proposing any fix.";
+}
+
+function stopReasonForFailureCategory(category: VerificationFailureCategory): string | undefined {
+  if (category === "command_unavailable") return "Stop until the missing verification command/toolchain is installed, configured, or explicitly replaced.";
+  if (category === "external_blocker") return "Stop until external authorization/network/provider state changes or the user chooses an unblock path.";
+  if (category === "flaky") return "Do not retry blindly; preserve the failed evidence and require fresh opt-in if more proof is needed.";
+  return undefined;
 }
 
 function findLatestRemediationAttemptIndex(attempts: VerificationRemediationAttempt[]): number {
@@ -4090,6 +4417,22 @@ function isVerificationRemediationStatus(value: unknown): value is VerificationR
 
 function isVerificationRemediationAttemptStatus(value: unknown): value is VerificationRemediationAttemptStatus {
   return value === "in_progress" || value === "passed" || value === "failed" || value === "stopped";
+}
+
+function isVerificationFailureCategory(value: unknown): value is VerificationFailureCategory {
+  return value === "build" || value === "typecheck" || value === "lint" || value === "test" || value === "command_unavailable" || value === "timeout" || value === "environment" || value === "external_blocker" || value === "flaky" || value === "coverage_gap" || value === "unknown";
+}
+
+function isVerificationFailureConfidence(value: unknown): value is VerificationFailureConfidence {
+  return value === "high" || value === "medium" || value === "low";
+}
+
+function isVerificationRemediationNextActionKind(value: unknown): value is VerificationRemediationNextActionKind {
+  return value === "inspect" || value === "fix" || value === "rerun" || value === "record" || value === "ask_user" || value === "stop";
+}
+
+function isVerificationRemediationNextActionStatus(value: unknown): value is VerificationRemediationNextActionStatus {
+  return value === "open" || value === "done" || value === "blocked";
 }
 
 
@@ -4458,6 +4801,474 @@ export function formatAcceptanceSummary(acceptance: AcceptanceState, max = 8): s
   return lines.join("\n");
 }
 
+export async function readPrdReview(root: string, taskId: string): Promise<PrdReviewState | undefined> {
+  const reviewPath = path.join(getProjectPaths(root).tasksDir, taskId, "prd-review.json");
+  if (!(await pathExists(reviewPath))) return undefined;
+  try {
+    return normalizePrdReviewState(JSON.parse(await readFile(reviewPath, "utf8")) as Partial<PrdReviewState>);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writePrdReview(root: string, task: TaskState, reason = "manual"): Promise<PrdReviewState> {
+  const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
+  await mkdir(taskDir, { recursive: true });
+  const currentTask = await loadTask(root, task.id) || task;
+  const review = await buildPrdReviewState(root, currentTask, reason);
+  await writeFile(path.join(taskDir, "prd-review.json"), `${JSON.stringify(review, null, 2)}\n`, "utf8");
+  await writeFile(path.join(taskDir, "prd-review.md"), formatPrdReview(currentTask, review), "utf8");
+  return review;
+}
+
+export function formatPrdReviewSummary(review: PrdReviewState, max = 8): string {
+  const coverage = review.planReview.coverage.slice(0, max).map(item => `${item.acceptanceId}:${item.status}${item.planStepIds.length > 0 ? `(${item.planStepIds.join(",")})` : ""}`);
+  const actions = review.promotion.nextActions.slice(0, max).map(item => `- ${item}`);
+  const decisions = review.decisions.slice(-max).map(item => `- ${item.id}: ${item.decision} — ${item.rationale}`);
+  return [
+    `stage: ${review.stage}`,
+    `readiness: ${review.promotion.ready ? "ready-to-implement" : "blocked"}`,
+    `completeness: ${review.completeness.blockers.length} blocker(s), ${review.completeness.warnings.length} warning(s), ${review.completeness.passes.length} pass(es)`,
+    `plan review: ${review.planReview.blockers.length} blocker(s), ${review.planReview.warnings.length} warning(s), ${review.planReview.passes.length} pass(es)`,
+    coverage.length > 0 ? `acceptance coverage: ${coverage.join("; ")}` : "acceptance coverage: none recorded",
+    decisions.length > 0 ? `decisions: ${review.decisions.length}\ndecision log:\n${decisions.join("\n")}` : "decisions: 0",
+    actions.length > 0 ? `next actions:\n${actions.join("\n")}` : undefined,
+  ].filter(line => line !== undefined).join("\n");
+}
+
+function formatPrdReview(task: TaskState, review: PrdReviewState): string {
+  return [
+    "# PRD Review",
+    "",
+    `Task: ${task.id}`,
+    `Title: ${task.title}`,
+    `Stage: ${review.stage}`,
+    `Ready: ${review.promotion.ready ? "yes" : "no"}`,
+    `Generated: ${review.updatedAt}`,
+    review.generatedFrom ? `Reason: ${review.generatedFrom}` : undefined,
+    "",
+    "## PRD Snapshot",
+    "",
+    "### Goal",
+    "",
+    review.prd.goal || "Not recorded.",
+    "",
+    "### Scope",
+    "",
+    formatReviewList(review.prd.scope, "No explicit scope recorded."),
+    "",
+    "### Actors / Users",
+    "",
+    formatReviewList(review.prd.users, "No explicit actors or users recorded."),
+    "",
+    "### Non-goals",
+    "",
+    formatReviewList(review.prd.nonGoals, "No explicit non-goals recorded."),
+    "",
+    "### Constraints",
+    "",
+    formatReviewList(review.prd.constraints, "No explicit constraints recorded."),
+    "",
+    "### Acceptance Criteria",
+    "",
+    formatReviewList(review.prd.acceptanceCriteria, "No acceptance criteria recorded."),
+    "",
+    "### Verification",
+    "",
+    formatReviewList(review.prd.verification, "No explicit verification expectations recorded."),
+    "",
+    "### Risks",
+    "",
+    formatReviewList(review.prd.risks, "No explicit risks recorded."),
+    "",
+    "### Dependencies",
+    "",
+    formatReviewList(review.prd.dependencies, "No explicit dependencies recorded."),
+    "",
+    "### Open Questions",
+    "",
+    formatReviewList(review.prd.openQuestions, "No meaningful open questions recorded."),
+    "",
+    "## Decisions",
+    "",
+    review.decisions.length === 0 ? "No decision records captured yet." : review.decisions.map(formatPrdDecision).join("\n"),
+    "",
+    "## Completeness Checks",
+    "",
+    "### Blockers",
+    "",
+    formatReviewIssues(review.completeness.blockers, "No PRD completeness blockers."),
+    "",
+    "### Warnings",
+    "",
+    formatReviewIssues(review.completeness.warnings, "No PRD completeness warnings."),
+    "",
+    "### Passes",
+    "",
+    formatReviewList(review.completeness.passes, "No PRD completeness passes recorded."),
+    "",
+    "## Plan Quality Checks",
+    "",
+    "### Acceptance-To-Plan Coverage",
+    "",
+    review.planReview.coverage.length === 0 ? "No acceptance coverage rows recorded." : review.planReview.coverage.map(formatAcceptancePlanCoverage).join("\n"),
+    "",
+    "### Blockers",
+    "",
+    formatReviewIssues(review.planReview.blockers, "No plan quality blockers."),
+    "",
+    "### Warnings",
+    "",
+    formatReviewIssues(review.planReview.warnings, "No plan quality warnings."),
+    "",
+    "### Passes",
+    "",
+    formatReviewList(review.planReview.passes, "No plan quality passes recorded."),
+    "",
+    "## Promotion Gate",
+    "",
+    `Ready: ${review.promotion.ready ? "yes" : "no"}`,
+    review.promotion.promotedAt ? `Promoted: ${review.promotion.promotedAt}` : undefined,
+    "",
+    "### Blockers",
+    "",
+    formatReviewIssues(review.promotion.blockers, "No promotion blockers."),
+    "",
+    "### Warnings",
+    "",
+    formatReviewIssues(review.promotion.warnings, "No promotion warnings."),
+    "",
+    "### Next Actions",
+    "",
+    formatReviewList(review.promotion.nextActions, "No promotion next actions."),
+    "",
+  ].filter(line => line !== undefined).join("\n");
+}
+
+interface PrdReviewBuildInputs {
+  acceptance?: AcceptanceState;
+  plan?: PlanState;
+  verificationStrategy?: VerificationStrategy;
+  clarification?: ClarificationState;
+  research?: ResearchState;
+}
+
+async function buildPrdReviewState(root: string, task: TaskState, reason: string, inputs: PrdReviewBuildInputs = {}): Promise<PrdReviewState> {
+  const [acceptance, plan, verificationStrategy, clarification, research] = await Promise.all([
+    inputs.acceptance ? Promise.resolve(inputs.acceptance) : readAcceptance(root, task.id),
+    inputs.plan ? Promise.resolve(inputs.plan) : readPlan(root, task.id),
+    inputs.verificationStrategy ? Promise.resolve(inputs.verificationStrategy) : readVerificationStrategy(root, task.id),
+    inputs.clarification ? Promise.resolve(inputs.clarification) : readTaskClarification(root, task.id),
+    inputs.research ? Promise.resolve(inputs.research) : readTaskResearch(root, task.id),
+  ]);
+  const now = new Date().toISOString();
+  const snapshot = buildPrdSnapshot(task, clarification);
+  const decisions = (research?.decisionRecords || []).map(decision => ({
+    id: decision.id,
+    decision: decision.decision,
+    rationale: decision.rationale,
+    alternatives: decision.alternatives,
+    sourcePackIds: decision.sourcePackIds,
+    createdAt: decision.createdAt,
+  }));
+  const completeness = buildPrdCompleteness(snapshot, clarification);
+  const planReview = buildPrdPlanReview(snapshot, acceptance, plan, verificationStrategy);
+  const promotion = buildPrdPromotionGate(task, completeness, planReview, research, decisions, now);
+  return {
+    taskId: task.id,
+    updatedAt: now,
+    generatedFrom: reason,
+    stage: derivePrdWorkflowStage(task, clarification, completeness.blockers, planReview.blockers, promotion.ready),
+    prd: snapshot,
+    decisions,
+    completeness,
+    planReview,
+    promotion,
+  };
+}
+
+function buildPrdSnapshot(task: TaskState, clarification?: ClarificationState): PrdSnapshot {
+  const prd = extractPrd(task.initialPrompt);
+  const draft = clarification?.draft;
+  return {
+    goal: draft?.goal || prd.goal,
+    scope: draft && draft.scope.length > 0 ? draft.scope : inferPrdList(task.initialPrompt, /\b(scope|in scope|includes?|deliverables?)\b|范围|包含|只做|交付/i),
+    users: draft && draft.users.length > 0 ? draft.users : inferPrdList(task.initialPrompt, /\b(users?|actors?|maintainers?|operators?|admins?)\b|用户|角色|维护者|使用者/i),
+    nonGoals: draft && draft.nonGoals.length > 0 ? draft.nonGoals : inferPrdList(task.initialPrompt, /\b(non[- ]?goals?|out of scope|not included|do not)\b|非目标|不包括|不做|不要/i),
+    constraints: draft && draft.constraints.length > 0 ? draft.constraints : prd.constraints,
+    acceptanceCriteria: draft && draft.acceptanceCriteria.length > 0 ? draft.acceptanceCriteria : prd.acceptanceCriteria,
+    verification: draft && draft.verification.length > 0 ? draft.verification : inferPrdList(task.initialPrompt, /\b(verification|verify|test|check|lint|qa)\b|验证|测试|检查/i),
+    risks: draft && draft.risks.length > 0 ? draft.risks : inferPrdList(task.initialPrompt, /\b(risks?|failure|regression|migration|compatibility)\b|风险|失败|回归|迁移|兼容/i),
+    dependencies: inferPrdList(task.initialPrompt, /\b(dependencies?|depends on|requires?|blocked by|prerequisites?)\b|依赖|前置|需要/i),
+    openQuestions: (draft && draft.openQuestions.length > 0 ? draft.openQuestions : prd.openQuestions).filter(isMeaningfulOpenQuestion),
+  };
+}
+
+function buildPrdCompleteness(prd: PrdSnapshot, clarification?: ClarificationState): PrdReviewState["completeness"] {
+  const blockers: PrdReviewIssue[] = [];
+  const warnings: PrdReviewIssue[] = [];
+  const passes: string[] = [];
+  if (!prd.goal.trim()) {
+    addPrdReviewIssue(blockers, "prd", "blocker", "PRD goal is missing.", "Capture a concrete goal with /prd:refine --axes goal.");
+  } else {
+    passes.push("PRD goal recorded.");
+  }
+  if (prd.acceptanceCriteria.length === 0 || prd.acceptanceCriteria.every(isDefaultAcceptanceCriterion)) {
+    addPrdReviewIssue(blockers, "acceptance", "blocker", "Acceptance criteria are missing or only default fallback criteria.", "Add task-specific acceptance criteria before planning.");
+  } else {
+    passes.push(`Acceptance criteria recorded: ${prd.acceptanceCriteria.length}.`);
+  }
+  if (prd.openQuestions.length > 0) {
+    addPrdReviewIssue(blockers, "prd", "blocker", `${prd.openQuestions.length} meaningful PRD question(s) remain open.`, `Resolve: ${prd.openQuestions[0]}`);
+  } else {
+    passes.push("No meaningful PRD open questions remain.");
+  }
+  if (clarification?.enabled && clarification.required && clarification.status === "collecting") {
+    addPrdReviewIssue(blockers, "prd", "blocker", "Required PRD clarification is still collecting.", "Answer or explicitly skip the current clarification question.");
+  } else if (clarification?.enabled) {
+    passes.push(`Clarification state is ${clarification.status}.`);
+  }
+  if (prd.scope.length === 0) addPrdReviewIssue(warnings, "prd", "warning", "Scope is not explicit.", "Record in-scope boundaries with /prd:refine --axes scope.");
+  if (prd.users.length === 0) addPrdReviewIssue(warnings, "prd", "warning", "Actors/users are not explicit.", "Record affected actors or maintainers with /prd:refine --axes users.");
+  if (prd.nonGoals.length === 0) addPrdReviewIssue(warnings, "prd", "warning", "Non-goals are not explicit.", "Capture out-of-scope behavior to prevent accidental scope expansion.");
+  if (prd.verification.length === 0) addPrdReviewIssue(warnings, "verification", "warning", "PRD does not name verification expectations.", "Add expected checks or manual verification criteria.");
+  if (prd.risks.length === 0) addPrdReviewIssue(warnings, "prd", "warning", "Risks are not explicit.", "Record regression, migration, or compatibility risks if any.");
+  if (prd.dependencies.length === 0) addPrdReviewIssue(warnings, "prd", "warning", "Dependencies are not explicit.", "Record prerequisites or state that none are known.");
+  return { blockers, warnings, passes };
+}
+
+function buildPrdPlanReview(prd: PrdSnapshot, acceptance: AcceptanceState, plan: PlanState, strategy: VerificationStrategy): PrdReviewState["planReview"] {
+  const blockers: PrdReviewIssue[] = [];
+  const warnings: PrdReviewIssue[] = [];
+  const passes: string[] = [];
+  const coverage = acceptance.items.map(item => buildAcceptanceCoverageRow(item, plan));
+  if (plan.steps.length === 0) {
+    addPrdReviewIssue(blockers, "plan", "blocker", "Implementation plan has no steps.", "Create a plan before promoting the task.");
+  } else {
+    passes.push(`Plan steps recorded: ${plan.steps.length}.`);
+  }
+  const blockedSteps = plan.steps.filter(step => step.status === "blocked");
+  if (blockedSteps.length > 0) {
+    addPrdReviewIssue(blockers, "plan", "blocker", `${blockedSteps.length} plan step(s) are blocked.`, `Unblock ${blockedSteps[0]?.id}: ${blockedSteps[0]?.text}`, blockedSteps.map(step => step.id));
+  }
+  const missingCoverage = coverage.filter(item => item.status === "missing");
+  const genericCoverage = coverage.filter(item => item.status === "generic");
+  if (missingCoverage.length > 0) {
+    addPrdReviewIssue(blockers, "plan", "blocker", `${missingCoverage.length} acceptance item(s) have no plan coverage.`, `Add a plan step for ${missingCoverage[0]?.acceptanceId}.`, missingCoverage.map(item => item.acceptanceId));
+  }
+  if (genericCoverage.length > 0) {
+    addPrdReviewIssue(warnings, "plan", "warning", `${genericCoverage.length} acceptance item(s) are covered only by generic plan steps.`, `Tighten the plan for ${genericCoverage[0]?.acceptanceId}.`, genericCoverage.map(item => item.acceptanceId));
+  }
+  if (coverage.length > 0 && missingCoverage.length === 0) {
+    passes.push(`Acceptance-to-plan coverage recorded: ${coverage.length}/${coverage.length}.`);
+  }
+  const hasVerificationPlan = plan.steps.some(step => /\b(verify|verification|test|check|lint)\b|验证|测试|检查/i.test(`${step.text} ${step.evidence || ""}`));
+  if (!hasVerificationPlan && prd.verification.length === 0 && strategy.suggestions.length === 0) {
+    addPrdReviewIssue(blockers, "verification", "blocker", "Plan has no verification coverage.", "Add a verification plan step or record an expected check.");
+  } else {
+    passes.push("Verification coverage is represented by plan, PRD, or suggested checks.");
+  }
+  if (strategy.policy.coverageGaps.length > 0) {
+    addPrdReviewIssue(warnings, "verification", "warning", `${strategy.policy.coverageGaps.length} verification policy coverage gap(s) remain.`, strategy.policy.coverageGaps[0] || "Review verification policy coverage.");
+  }
+  return { coverage, blockers, warnings, passes };
+}
+
+function buildPrdPromotionGate(
+  task: TaskState,
+  completeness: PrdReviewState["completeness"],
+  planReview: PrdReviewState["planReview"],
+  research: ResearchState | undefined,
+  decisions: PrdDecisionEntry[],
+  now: string,
+): PrdReviewState["promotion"] {
+  const blockers = [...completeness.blockers, ...planReview.blockers];
+  const warnings = [...completeness.warnings, ...planReview.warnings];
+  if (decisions.length === 0) {
+    addPrdReviewIssue(warnings, "decision", "warning", "No decision records are captured yet.", "Record important tradeoffs with /research:decision when a choice affects implementation.");
+  }
+  const openResearchQuestions = (research?.questions || []).filter(question => question.status === "open" || question.status === "blocked");
+  const conflictingFindings = (research?.findingRecords || []).filter(finding => finding.status === "conflicting");
+  if (openResearchQuestions.length > 0) {
+    addPrdReviewIssue(blockers, "research", "blocker", `${openResearchQuestions.length} research question(s) remain open or blocked.`, `Answer or block ${openResearchQuestions[0]?.id}: ${openResearchQuestions[0]?.text}`, openResearchQuestions.map(question => question.id));
+  }
+  if (conflictingFindings.length > 0) {
+    addPrdReviewIssue(blockers, "research", "blocker", `${conflictingFindings.length} conflicting research finding(s) remain.`, `Resolve finding ${conflictingFindings[0]?.id}.`, conflictingFindings.map(finding => finding.id));
+  }
+  if (taskNeedsResearchSourcePack(task)) {
+    const reviewed = (research?.sourcePacks || []).filter(pack => pack.reviewStatus === "reviewed");
+    if (reviewed.length === 0) {
+      addPrdReviewIssue(warnings, "research", "warning", "No reviewed research source pack recorded for upstream/parity work.", "Review a draft source or add reviewed source evidence before final review.");
+    }
+  }
+  const ready = blockers.length === 0;
+  const nextActions = dedupeStrings([...blockers, ...warnings].map(issue => issue.nextAction)).slice(0, 12);
+  return { ready, blockers, warnings, nextActions, promotedAt: ready ? now : undefined };
+}
+
+function buildAcceptanceCoverageRow(item: AcceptanceItem, plan: PlanState): AcceptancePlanCoverage {
+  const specific = plan.steps.filter(step => planStepMatchesAcceptance(step, item));
+  if (specific.length > 0) {
+    return { acceptanceId: item.id, acceptanceText: item.text, planStepIds: specific.map(step => step.id), status: "covered" };
+  }
+  const generic = plan.steps.filter(step => /\b(implement|build|verify|test|check|acceptance)\b|实现|验证|测试|检查|验收/i.test(`${step.text} ${step.evidence || ""}`));
+  if (generic.length > 0) {
+    return { acceptanceId: item.id, acceptanceText: item.text, planStepIds: generic.map(step => step.id), status: "generic" };
+  }
+  return { acceptanceId: item.id, acceptanceText: item.text, planStepIds: [], status: "missing" };
+}
+
+function planStepMatchesAcceptance(step: PlanStep, item: AcceptanceItem): boolean {
+  const target = `${step.text} ${step.evidence || ""}`.toLowerCase();
+  const tokens = extractTokens(item.text).filter(token => token.length >= 4);
+  return tokens.length > 0 && tokens.some(token => target.includes(token));
+}
+
+function derivePrdWorkflowStage(task: TaskState, clarification: ClarificationState | undefined, completenessBlockers: PrdReviewIssue[], planBlockers: PrdReviewIssue[], promotionReady: boolean): PrdWorkflowStage {
+  if (clarification?.enabled && clarification.required && clarification.status === "collecting") return "needs-clarification";
+  if (completenessBlockers.length > 0) return "draft";
+  if (planBlockers.length > 0) return "plan-review";
+  if (promotionReady && (task.phase === "implementing" || task.phase === "verifying" || task.phase === "finished")) return "implementing";
+  if (promotionReady) return "ready-to-implement";
+  return "ready-to-plan";
+}
+
+function addPrdReviewIssue(target: PrdReviewIssue[], category: PrdReviewCategory, severity: Exclude<PrdReviewSeverity, "pass">, message: string, nextAction: string, relatedIds: string[] = []): void {
+  target.push({
+    id: `${category.toUpperCase()}-${severity === "blocker" ? "B" : "W"}${target.length + 1}`,
+    severity,
+    category,
+    message,
+    nextAction,
+    relatedIds,
+  });
+}
+
+function inferPrdList(prompt: string, pattern: RegExp, max = 6): string[] {
+  return prompt
+    .split(/\r?\n/)
+    .map(line => stripListPrefix(line.trim()))
+    .filter(line => line.length > 0 && pattern.test(line))
+    .slice(0, max);
+}
+
+function formatReviewList(items: string[], empty: string): string {
+  return items.length === 0 ? empty : items.map(item => `- ${item}`).join("\n");
+}
+
+function formatReviewIssues(issues: PrdReviewIssue[], empty: string): string {
+  return issues.length === 0 ? empty : issues.map(issue => `- ${issue.id} [${issue.category}/${issue.severity}] ${issue.message} Next: ${issue.nextAction}${issue.relatedIds.length > 0 ? ` Related: ${issue.relatedIds.join(",")}` : ""}`).join("\n");
+}
+
+function formatPrdDecision(decision: PrdDecisionEntry): string {
+  return `- ${decision.id}: ${decision.decision} — ${decision.rationale}${decision.sourcePackIds.length > 0 ? ` sources: ${decision.sourcePackIds.join(",")}` : ""}${decision.alternatives.length > 0 ? ` alternatives: ${decision.alternatives.join("; ")}` : ""}`;
+}
+
+function formatAcceptancePlanCoverage(row: AcceptancePlanCoverage): string {
+  return `- ${row.acceptanceId} [${row.status}] ${row.acceptanceText}${row.planStepIds.length > 0 ? ` plan: ${row.planStepIds.join(",")}` : ""}`;
+}
+
+function normalizePrdReviewState(value: Partial<PrdReviewState> | undefined): PrdReviewState | undefined {
+  if (!value || typeof value.taskId !== "string" || typeof value.updatedAt !== "string" || !value.prd) return undefined;
+  return {
+    taskId: value.taskId,
+    updatedAt: value.updatedAt,
+    generatedFrom: typeof value.generatedFrom === "string" ? value.generatedFrom : undefined,
+    stage: isPrdWorkflowStage(value.stage) ? value.stage : "draft",
+    prd: normalizePrdSnapshot(value.prd),
+    decisions: Array.isArray(value.decisions) ? value.decisions.filter(isPrdDecisionEntry) : [],
+    completeness: normalizePrdReviewSection(value.completeness),
+    planReview: normalizePrdPlanReview(value.planReview),
+    promotion: normalizePrdPromotion(value.promotion),
+  };
+}
+
+function normalizePrdSnapshot(value: unknown): PrdSnapshot {
+  const record = normalizeRecord(value);
+  return {
+    goal: typeof record.goal === "string" ? record.goal : "",
+    scope: normalizeStringArray(record.scope),
+    users: normalizeStringArray(record.users),
+    nonGoals: normalizeStringArray(record.nonGoals),
+    constraints: normalizeStringArray(record.constraints),
+    acceptanceCriteria: normalizeStringArray(record.acceptanceCriteria),
+    verification: normalizeStringArray(record.verification),
+    risks: normalizeStringArray(record.risks),
+    dependencies: normalizeStringArray(record.dependencies),
+    openQuestions: normalizeStringArray(record.openQuestions),
+  };
+}
+
+function normalizePrdReviewSection(value: unknown): PrdReviewState["completeness"] {
+  const record = normalizeRecord(value);
+  return {
+    blockers: normalizePrdReviewIssues(record.blockers),
+    warnings: normalizePrdReviewIssues(record.warnings),
+    passes: normalizeStringArray(record.passes),
+  };
+}
+
+function normalizePrdPlanReview(value: unknown): PrdReviewState["planReview"] {
+  const record = normalizeRecord(value);
+  return {
+    coverage: Array.isArray(record.coverage) ? record.coverage.filter(isAcceptancePlanCoverage) : [],
+    blockers: normalizePrdReviewIssues(record.blockers),
+    warnings: normalizePrdReviewIssues(record.warnings),
+    passes: normalizeStringArray(record.passes),
+  };
+}
+
+function normalizePrdPromotion(value: unknown): PrdReviewState["promotion"] {
+  const record = normalizeRecord(value);
+  return {
+    ready: record.ready === true,
+    blockers: normalizePrdReviewIssues(record.blockers),
+    warnings: normalizePrdReviewIssues(record.warnings),
+    nextActions: normalizeStringArray(record.nextActions),
+    promotedAt: typeof record.promotedAt === "string" ? record.promotedAt : undefined,
+  };
+}
+
+function normalizePrdReviewIssues(value: unknown): PrdReviewIssue[] {
+  return Array.isArray(value) ? value.filter(isPrdReviewIssue) : [];
+}
+
+function isPrdReviewIssue(value: unknown): value is PrdReviewIssue {
+  const record = normalizeRecord(value);
+  return typeof record.id === "string" &&
+    (record.severity === "blocker" || record.severity === "warning") &&
+    isPrdReviewCategory(record.category) &&
+    typeof record.message === "string" &&
+    typeof record.nextAction === "string" &&
+    Array.isArray(record.relatedIds);
+}
+
+function isPrdDecisionEntry(value: unknown): value is PrdDecisionEntry {
+  const record = normalizeRecord(value);
+  return typeof record.id === "string" &&
+    typeof record.decision === "string" &&
+    typeof record.rationale === "string" &&
+    Array.isArray(record.alternatives) &&
+    Array.isArray(record.sourcePackIds) &&
+    typeof record.createdAt === "string";
+}
+
+function isAcceptancePlanCoverage(value: unknown): value is AcceptancePlanCoverage {
+  const record = normalizeRecord(value);
+  return typeof record.acceptanceId === "string" &&
+    typeof record.acceptanceText === "string" &&
+    Array.isArray(record.planStepIds) &&
+    (record.status === "covered" || record.status === "generic" || record.status === "missing");
+}
+
+function isPrdWorkflowStage(value: unknown): value is PrdWorkflowStage {
+  return value === "draft" || value === "needs-clarification" || value === "ready-to-plan" || value === "plan-review" || value === "ready-to-implement" || value === "implementing";
+}
+
+function isPrdReviewCategory(value: unknown): value is PrdReviewCategory {
+  return value === "prd" || value === "acceptance" || value === "plan" || value === "verification" || value === "research" || value === "decision" || value === "promotion";
+}
+
 export async function readTaskHandoff(root: string, taskId: string): Promise<string | undefined> {
   const handoffPath = path.join(getProjectPaths(root).tasksDir, taskId, "handoff.md");
   if (!(await pathExists(handoffPath))) return undefined;
@@ -4477,7 +5288,8 @@ export async function writeTaskHandoff(root: string, task: TaskState, reason = "
   const strategy = await readVerificationStrategy(root, task.id);
   const clarification = await readTaskClarification(root, task.id);
   const research = await readTaskResearch(root, task.id);
-  const content = formatTaskHandoff(task, verification, acceptance, plan, strategy, clarification, research, reason);
+  const prdReview = await writePrdReview(root, task, reason);
+  const content = formatTaskHandoff(task, verification, acceptance, plan, strategy, clarification, research, prdReview, reason);
   await writeFile(path.join(taskDir, "handoff.md"), content, "utf8");
   await writeTaskInfo(root, task, reason);
   await writeTaskResume(root, task, reason);
@@ -4645,13 +5457,14 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const clarification = snapshot?.clarification;
   const research = snapshot?.research;
   const info = snapshot?.info;
+  const prdReview = snapshot?.prdReview || (task ? await writePrdReview(root, task, "context") : undefined);
   const subtaskSummary = task ? await formatSubtaskTreeSummary(root, task, 8) : undefined;
   const subtaskPlan = task ? await readSubtaskPlan(root, task.id) : undefined;
   const roles = task ? await readRoleOrchestration(root, task.id) : undefined;
   const remediation = snapshot?.remediation || (task ? await readVerificationRemediationPlan(root, task.id) : undefined);
   const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, remediation, handoff, resume, readiness, snapshot, clarification, subtaskSummary, subtaskPlan, roles, research, info, upstreamReport);
-  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, remediation, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, subtaskPlan, roles, research, info, upstreamReport, content };
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, remediation, handoff, resume, readiness, snapshot, clarification, subtaskSummary, subtaskPlan, roles, research, info, prdReview, upstreamReport);
+  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, remediation, handoff, resume, readiness, snapshot, prdReview, subtasks: subtaskSummary, subtaskPlan, roles, research, info, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -4672,6 +5485,7 @@ export function formatContextBundle(
   roles?: RoleOrchestrationPlan,
   research?: ResearchState,
   info?: string,
+  prdReview?: PrdReviewState,
   upstreamReport?: UpstreamSyncReport,
 ): string {
   const lines: string[] = [
@@ -4716,6 +5530,9 @@ export function formatContextBundle(
       const next = nextPlanStep(plan);
       lines.push("", "Plan:", formatPlanSummary(plan, 6));
       if (next) lines.push(`Next plan step: ${next.id} - ${next.text}`);
+    }
+    if (prdReview) {
+      lines.push("", "PRD review:", formatPrdReviewSummary(prdReview, 6));
     }
     if (verificationStrategy) {
       lines.push("", "Verification suggestions:", formatVerificationSuggestions(verificationStrategy, 6));
@@ -5618,6 +6435,7 @@ function formatTaskInfo(
   subtaskPlan: SubtaskPlan | undefined,
   roles: RoleOrchestrationPlan | undefined,
   remediation: VerificationRemediationPlan | undefined,
+  prdReview: PrdReviewState,
   reason: string,
 ): string {
   return [
@@ -5637,6 +6455,10 @@ function formatTaskInfo(
     "## Metadata",
     "",
     task.metadata ? formatTaskMetadataSummary(task.metadata, 12) : "No task metadata recorded yet.",
+    "",
+    "## PRD Review",
+    "",
+    formatPrdReviewSummary(prdReview, 12),
     "",
     "## Subtasks",
     "",
@@ -6108,6 +6930,7 @@ function formatTaskHandoff(
   strategy: VerificationStrategy,
   clarification: ClarificationState | undefined,
   research: ResearchState | undefined,
+  prdReview: PrdReviewState,
   reason: string,
 ): string {
   const lastCheck = verification.checks.at(-1);
@@ -6139,6 +6962,10 @@ function formatTaskHandoff(
     "## Plan",
     "",
     formatPlanSummary(plan, 12),
+    "",
+    "## PRD Review",
+    "",
+    formatPrdReviewSummary(prdReview, 8),
     "",
     "## Clarification",
     "",
@@ -6536,6 +7363,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
   const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
   const roles = await readRoleOrchestration(root, currentTask.id);
   const remediation = await readVerificationRemediationPlan(root, currentTask.id);
+  const prdReview = await writePrdReview(root, currentTask, reason);
   const recentEvents = events.slice(-20).map(event => ({
     type: event.type,
     timestamp: event.timestamp,
@@ -6548,7 +7376,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     title: currentTask.title,
     status: currentTask.status,
     phase: currentTask.phase,
-    summary: summarizeSnapshot(currentTask, acceptance, plan, verification, readiness, clarification),
+    summary: summarizeSnapshot(currentTask, acceptance, plan, verification, readiness, clarification, prdReview),
     task: currentTask,
     acceptance,
     plan,
@@ -6564,6 +7392,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     subtaskPlan,
     roles,
     research,
+    prdReview,
     info,
     handoff,
   };
@@ -6591,6 +7420,10 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "## Finish Readiness",
     "",
     formatReadinessSummary(snapshot.readiness, 6),
+    "",
+    "## PRD Review",
+    "",
+    snapshot.prdReview ? formatPrdReviewSummary(snapshot.prdReview, 8) : "No PRD review artifact recorded yet.",
     "",
     "## Metadata",
     "",
@@ -6672,6 +7505,7 @@ export function formatSnapshotSummary(snapshot: TaskSnapshot): string {
     snapshot.roles ? `roles: ${formatRoleOrchestrationSummary(snapshot.roles, 3).split(/\r?\n/)[0]}` : undefined,
     snapshot.remediation ? formatVerificationRemediationSummary(snapshot.remediation) : undefined,
     snapshot.clarification ? `clarification: ${snapshot.clarification.status}` : undefined,
+    snapshot.prdReview ? `prd review: ${snapshot.prdReview.stage}/${snapshot.prdReview.promotion.ready ? "ready" : "blocked"}` : undefined,
     `acceptance: ${snapshot.acceptance.items.filter(item => item.status === "done").length}/${snapshot.acceptance.items.length} done`,
     `verification: ${snapshot.verification.checks.length} check(s)`,
     `touched files: ${snapshot.touchedFiles.length}`,
@@ -6690,6 +7524,7 @@ function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
     snapshot.roles ? `- roles: ${formatRoleOrchestrationSummary(snapshot.roles, 3).replace(/\r?\n/g, "; ")}` : "- roles: none",
     snapshot.remediation ? `- remediation: ${formatVerificationRemediationSummary(snapshot.remediation)}` : "- remediation: none",
     snapshot.clarification ? `- clarification: ${snapshot.clarification.status}, ${openClarificationQuestions(snapshot.clarification).length} open` : "- clarification: none",
+    snapshot.prdReview ? `- prd review: ${snapshot.prdReview.stage}, ready ${snapshot.prdReview.promotion.ready ? "yes" : "no"}, blockers ${snapshot.prdReview.promotion.blockers.length}, warnings ${snapshot.prdReview.promotion.warnings.length}` : "- prd review: none",
     `- touched files: ${snapshot.touchedFiles.slice(0, 8).join(", ") || "none inferred"}`,
   ].join("\n");
   return content.length <= max ? content : `${content.slice(0, max)}\n[Snapshot truncated by Project Flow]`;
@@ -6702,6 +7537,7 @@ function summarizeSnapshot(
   verification: VerificationState,
   readiness: ReadinessState,
   clarification?: ClarificationState,
+  prdReview?: PrdReviewState,
 ): string {
   const doneAcceptance = acceptance.items.filter(item => item.status === "done").length;
   const donePlan = plan.steps.filter(step => step.status === "done").length;
@@ -6712,6 +7548,7 @@ function summarizeSnapshot(
     `Plan ${donePlan}/${plan.steps.length} done.`,
     task.metadata ? `Metadata ${formatTaskMetadataInline(task.metadata)}.` : undefined,
     clarification ? `Clarification is ${clarification.status}.` : undefined,
+    prdReview ? `PRD review is ${prdReview.stage}/${prdReview.promotion.ready ? "ready" : "blocked"}.` : undefined,
     lastCheck ? `Latest verification ${lastCheck.success ? "passed" : "failed"}: ${lastCheck.command || lastCheck.toolName}.` : "No verification recorded.",
     `Finish readiness is ${readiness.status}.`,
   ].filter(line => line !== undefined).join(" ");
@@ -6791,18 +7628,20 @@ function buildResearchReadinessSignals(research: ResearchState | undefined): { w
 
 async function buildReadinessState(root: string, task: TaskState, reason: string): Promise<ReadinessState> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [acceptance, verification, plan, clarification, strategy, research] = await Promise.all([
+  const [acceptance, verification, plan, clarification, strategy, research, remediation] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readVerification(root, currentTask.id),
     readPlan(root, currentTask.id),
     readTaskClarification(root, currentTask.id),
     readVerificationStrategy(root, currentTask.id),
     readTaskResearch(root, currentTask.id),
+    readVerificationRemediationPlan(root, currentTask.id),
   ]);
   const blockers: string[] = [];
   const warnings: string[] = [];
   const passes: string[] = [];
   const nextActions: string[] = [];
+  const prdReview = await buildPrdReviewState(root, currentTask, reason, { acceptance, plan, verificationStrategy: strategy, clarification, research });
 
   if (clarification?.enabled && clarification.required && clarification.status === "collecting") {
     blockers.push(`${openClarificationQuestions(clarification).length} required clarification question(s) remain open.`);
@@ -6859,6 +7698,12 @@ async function buildReadinessState(root: string, task: TaskState, reason: string
   if (failedChecks.length > 0 && lastCheck?.success) {
     warnings.push(`${failedChecks.length} earlier verification check(s) failed; confirm the latest pass covers the fix.`);
   }
+  if (remediation && remediation.failedChecks.length > 0 && remediation.status !== "resolved") {
+    warnings.push(`Verification remediation pending: ${formatVerificationRemediationSummary(remediation)}.`);
+    nextActions.push(...remediation.nextActions.slice(0, 4));
+  } else if (remediation?.status === "resolved") {
+    passes.push(`Verification remediation resolved: ${formatVerificationRemediationSummary(remediation)}.`);
+  }
   if (strategy.policy.coverageGaps.length > 0 && verification.checks.length > 0) {
     warnings.push(`${strategy.policy.coverageGaps.length} verification coverage gap(s) remain.`);
     nextActions.push(...strategy.policy.coverageGaps.slice(0, 4));
@@ -6868,6 +7713,13 @@ async function buildReadinessState(root: string, task: TaskState, reason: string
     warnings.push(...researchSignals.warnings);
     nextActions.push(...researchSignals.nextActions);
     passes.push(...researchSignals.passes);
+  }
+
+  if (prdReview.promotion.blockers.length > 0) {
+    blockers.push(`${prdReview.promotion.blockers.length} PRD/plan promotion blocker(s) remain.`);
+    nextActions.push(...prdReview.promotion.nextActions.slice(0, 4));
+  } else {
+    passes.push(`PRD/plan promotion gate ready: ${prdReview.stage} (${prdReview.promotion.warnings.length} warning(s)).`);
   }
 
   if (currentTask.counters.failedToolCalls > 0) {

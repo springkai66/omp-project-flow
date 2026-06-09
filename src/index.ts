@@ -25,6 +25,7 @@ import {
   formatClarificationSummary,
   formatRoleOrchestrationSummary,
   formatProjectOverviewSummary,
+  formatPrdReviewSummary,
   formatReadinessSummary,
   formatResearchSummary,
   formatVerificationRemediationSummary,
@@ -47,6 +48,7 @@ import {
   pauseActiveTask,
   readAcceptance,
   readProjectAutoSubtaskMode,
+  readPrdReview,
   readPlan,
   readSpecDocuments,
   refreshSubtaskPlanArtifacts,
@@ -80,6 +82,7 @@ import {
   writeTaskInfo,
   writeSubtaskPlan,
   writeTaskReadiness,
+  writePrdReview,
   writeTaskResume,
   writeTaskSnapshot,
   updateUpstreamSource,
@@ -383,7 +386,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         return;
       }
       const info = await writeTaskInfo(root, task, "command");
-      ctx.ui.notify(trimForNotice(info), "info");
+      ctx.ui.notify(trimForNotice(info, 5000), "info");
     },
   });
 
@@ -645,6 +648,23 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       }
       ctx.ui.notify(formatClarificationSummary(state, 12), state.status === "collecting" ? "warning" : "info");
       sendClarificationPrompt(pi, task, state);
+    },
+  });
+
+  pi.registerCommand("prd:review", {
+    description: "Show or refresh the structured PRD and plan promotion review",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parsed = parsePrdReviewArgs(args);
+      const task = await getTaskFromArgsOrActive(root, parsed.query, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const review = parsed.refresh
+        ? await writePrdReview(root, task, "prd_review_command")
+        : (await readPrdReview(root, task.id)) || await writePrdReview(root, task, "prd_review_command");
+      ctx.ui.notify(`PRD review for ${task.id}:\n${formatPrdReviewSummary(review, 12)}`, review.promotion.ready ? "info" : "warning");
     },
   });
 
@@ -1048,7 +1068,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("verify:remediate", {
-    description: "Show or advance the opt-in verification remediation loop",
+    description: "Show, refresh, or advance the opt-in verification remediation and next-action loop",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const parsed = parseVerificationRemediationArgs(args);
@@ -1074,10 +1094,10 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         ctx.ui.notify(result.plan ? formatVerificationRemediationSummary(result.plan) : `Could not update remediation for ${task.id}.`, result.status === "no_active_attempt" || status !== "passed" ? "warning" : "info");
         return;
       }
-      const remediation = parsed.action === "refresh"
-        ? await writeVerificationRemediationPlan(root, task, "command_refresh")
+      const remediation = parsed.action === "refresh" || parsed.action === "next"
+        ? await writeVerificationRemediationPlan(root, task, parsed.action === "next" ? "command_next_action" : "command_refresh")
         : (await readVerificationRemediationPlan(root, task.id)) || await writeVerificationRemediationPlan(root, task, "command");
-      if (parsed.action === "refresh") {
+      if (parsed.action === "refresh" || parsed.action === "next") {
         await writeTaskInfo(root, task, "verification_remediation_refreshed", { refreshRemediation: true });
         await writeTaskSnapshot(root, task, "verification_remediation_refreshed");
         await writeTaskHandoff(root, task, "verification_remediation_refreshed");
@@ -1628,15 +1648,19 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     return value === "auto" || value === "acceptance" || value === "workflow" || value === "roles" || value === "verification";
   }
 
-  function parseVerificationRemediationArgs(args: string): { action: "show" | "refresh" | "start" | "pass" | "fail" | "stop"; query: string; note?: string } {
+  function parseVerificationRemediationArgs(args: string): { action: "show" | "refresh" | "next" | "start" | "pass" | "fail" | "stop"; query: string; note?: string } {
     const parts = args.trim().split(/\s+/).filter(Boolean);
-    let action: "show" | "refresh" | "start" | "pass" | "fail" | "stop" = "show";
+    let action: "show" | "refresh" | "next" | "start" | "pass" | "fail" | "stop" = "show";
     const queryParts: string[] = [];
     const noteParts: string[] = [];
     for (let i = 0; i < parts.length; i += 1) {
       const part = parts[i];
       if (part === "--refresh" || part === "refresh") {
         action = "refresh";
+        continue;
+      }
+      if (part === "--next" || part === "next") {
+        action = "next";
         continue;
       }
       if (part === "--start" || part === "start" || part === "--pass" || part === "pass" || part === "--fail" || part === "fail" || part === "--stop" || part === "stop") {
@@ -1747,6 +1771,20 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       queryParts.push(part);
     }
     return { query: queryParts.join(" "), maxQuestions };
+  }
+
+  function parsePrdReviewArgs(args: string): { query: string; refresh: boolean } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    const queryParts: string[] = [];
+    let refresh = false;
+    for (const part of parts) {
+      if (part === "--refresh" || part === "refresh") {
+        refresh = true;
+        continue;
+      }
+      queryParts.push(part);
+    }
+    return { query: queryParts.join(" "), refresh };
   }
 
   function parsePrdRefineArgs(args: string): { query: string; maxQuestions?: number; requiredAxes?: ClarificationAxis[] } {

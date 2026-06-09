@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.27.0
+
+- Added local verification failure classification with evidence, confidence, impacted files/signals, retryability, and explicit stop reasons.
+- Verification remediation now persists structured next-action records and a remediation ledger while keeping rerun/fix commands opt-in only.
+- Added `/verify:remediate --next` to regenerate reviewable next actions without executing commands.
+
+## 0.26.0
+
+- Added structured PRD review artifacts with PRD snapshots, decision logs, completeness checks, plan-quality checks, acceptance-to-plan coverage, and promotion readiness.
+- Promotion/readiness summaries now flow into task info, handoff, snapshots, hidden context, and finish readiness.
+- Added `/prd:review` for local review and refresh of the PRD-to-plan gate.
+
 ## 0.25.0
 
 - Closed the local research workflow with structured questions, findings, decisions, risks, reviewed/draft source packs, and research handoff packets.

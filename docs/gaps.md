@@ -18,10 +18,10 @@ It also records implemented areas that are useful but still below the depth of T
   - Target behavior: launch or coordinate independent role sessions when OMP exposes a safe runtime API, while preserving explicit state ownership, handoff artifacts, and check outputs.
 
 - Automatic verification remediation loop
-  - Status: partial.
-  - Current behavior: Project Flow detects likely verification commands, records pass/fail checks, blocks premature finish when checks are missing or failing, and now supports an opt-in `/verify:remediate` loop with failed-check evidence, bounded attempts, stop conditions, and explicit pass/fail/stop records.
-  - Remaining gap: the loop records and governs remediation, but it still does not automatically apply fixes or rerun commands; that remains user/agent-controlled.
-  - Target behavior: add safe fix-and-rerun execution policies, failure classification, coverage-aware check selection, and clear user control before risky commands run.
+  - Status: complete-local in 0.27.0; below autonomous self-fix parity only.
+  - Current behavior: Project Flow detects likely verification commands, records pass/fail checks, blocks premature finish when checks are missing or failing, supports an opt-in `/verify:remediate` loop, classifies failed checks with evidence/confidence/signals/impacted files, writes structured next-action records plus a remediation ledger, and keeps rerun/fix commands opt-in.
+  - Boundary: Project Flow does not automatically apply fixes, rerun commands, install dependencies, or launch hidden agents; it records reviewable next actions and stop reasons grounded in observed verification evidence.
+  - Target behavior: add safe self-fix execution policies only if the runtime exposes explicit user-controlled execution contracts and the task carries reviewed evidence for the policy.
 
 ## Medium Priority
 
@@ -43,10 +43,10 @@ It also records implemented areas that are useful but still below the depth of T
 ## Implemented But Below Parity
 
 - PRD / acceptance / plan artifacts
-  - Status: implemented, below Superpowers/Trellis depth.
-  - Current behavior: Project Flow extracts a PRD, acceptance criteria, and a default implementation plan from the initial prompt.
-  - Gap: artifacts are useful but still mostly heuristic; they do not yet enforce a complete methodical spec-to-plan workflow, plan quality checks, task decomposition gates, or rich design review loops.
-  - Target behavior: add stronger spec completeness checks, plan review criteria, explicit non-goals, decision logs, and promotion gates before implementation.
+  - Status: complete-local in 0.26.0; below autonomous design-review parity only.
+  - Current behavior: Project Flow writes `prd-review.json` and `prd-review.md` for each task with a structured PRD snapshot, decision log, completeness blockers/warnings, plan-quality checks, acceptance-to-plan coverage, verification coverage, and a promotion readiness state. The promotion summary flows into `info.md`, handoff, snapshots, hidden context, and finish readiness.
+  - Boundary: planning remains deterministic and local to `.project-flow/`; Project Flow records reviewable blockers and warnings but does not invent missing product decisions or launch hidden design-review agents.
+  - Target behavior: add richer interactive design review and agent-assisted planning only when the runtime exposes a safe, auditable agent/session contract.
 
 - Research artifacts and `info.md`
   - Status: complete-local in 0.25.0; external-blocked only for autonomous research-agent launch.
@@ -79,10 +79,10 @@ It also records implemented areas that are useful but still below the depth of T
   - Target behavior: add dependencies, ordering, richer batch creation controls, large-tree summaries, and role-aware child execution.
 
 - Verification suggestions and readiness blocking
-  - Status: implemented, below ECC/OMO/Superpowers depth.
-  - Current behavior: Project Flow detects likely verification commands, records verification events, blocks finish when checks are missing or failing, tracks opt-in remediation attempts with stop conditions and evidence, and now persists a verification policy matrix that compares touched-file categories with suggested checks and recorded pass evidence.
-  - Gap: it does not classify flaky failures, enforce a configurable user-defined verification matrix, or execute the self-fix loop automatically.
-  - Target behavior: add configurable verification policies, failure classification, rerun attempt analysis, and safe self-fix loop integration.
+  - Status: implemented locally, below ECC/OMO/Superpowers autonomous execution depth.
+  - Current behavior: Project Flow detects likely verification commands, records verification events, blocks finish when checks are missing or failing, tracks opt-in remediation attempts with stop conditions and evidence, persists a verification policy matrix, classifies failed checks, and writes explicit next-action records without running commands silently.
+  - Gap: it does not enforce a user-defined verification matrix or execute the self-fix loop automatically.
+  - Target behavior: add configurable verification policies, richer rerun analysis, and safe self-fix integration only behind explicit user control.
 
 - Upstream sync framework
   - Status: implemented as a local enhancement, below automated upstream-intelligence depth.
