@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.19.0
+
+- Added opt-in verification remediation loop artifacts with failed checks, next actions, stop conditions, and bounded attempts.
+- Added `/verify:remediate` to show, refresh, start, pass, fail, or stop remediation attempts without running commands silently.
+- Remediation summaries now flow into task info, snapshots, and hidden context.
+
 ## 0.18.0
 
 - Added role orchestration handoffs for `research`, `implement`, and `check` roles under each task's `roles/` directory.

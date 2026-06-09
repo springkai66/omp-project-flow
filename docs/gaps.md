@@ -19,8 +19,9 @@ It also records implemented areas that are useful but still below the depth of T
 
 - Automatic verification remediation loop
   - Status: partial.
-  - Current behavior: Project Flow detects likely verification commands, records pass/fail checks, and blocks premature finish when checks are missing or failing.
-  - Target behavior: add an opt-in fix-and-rerun loop with attempt limits, stop conditions, recorded evidence, and clear user control before risky commands run.
+  - Current behavior: Project Flow detects likely verification commands, records pass/fail checks, blocks premature finish when checks are missing or failing, and now supports an opt-in `/verify:remediate` loop with failed-check evidence, bounded attempts, stop conditions, and explicit pass/fail/stop records.
+  - Remaining gap: the loop records and governs remediation, but it still does not automatically apply fixes or rerun commands; that remains user/agent-controlled.
+  - Target behavior: add safe fix-and-rerun execution policies, failure classification, coverage-aware check selection, and clear user control before risky commands run.
 
 ## Medium Priority
 
@@ -79,9 +80,9 @@ It also records implemented areas that are useful but still below the depth of T
 
 - Verification suggestions and readiness blocking
   - Status: implemented, below ECC/OMO/Superpowers depth.
-  - Current behavior: Project Flow detects likely verification commands, records verification events, and blocks finish when checks are missing or failing.
-  - Gap: it does not own the full verify-fix-rerun lifecycle, classify flaky failures, compare check coverage to touched files, or enforce a configurable verification matrix.
-  - Target behavior: add verification policies, coverage-aware check selection, failure classification, rerun attempt tracking, and self-fix loop integration.
+  - Current behavior: Project Flow detects likely verification commands, records verification events, blocks finish when checks are missing or failing, and tracks opt-in remediation attempts with stop conditions and evidence.
+  - Gap: it does not classify flaky failures, compare check coverage to touched files, enforce a configurable verification matrix, or execute the self-fix loop automatically.
+  - Target behavior: add verification policies, coverage-aware check selection, failure classification, rerun attempt analysis, and safe self-fix loop integration.
 
 - Upstream sync framework
   - Status: implemented as a local enhancement, below automated upstream-intelligence depth.

@@ -100,6 +100,7 @@ export interface ContextBundle {
   plan?: PlanState;
   verificationStrategy?: VerificationStrategy;
   handoff?: string;
+  remediation?: VerificationRemediationPlan;
   resume?: ResumeState;
   readiness?: ReadinessState;
   snapshot?: TaskSnapshot;
@@ -160,6 +161,7 @@ export interface TaskSnapshot {
   plan: PlanState;
   verification: VerificationState;
   verificationStrategy: VerificationStrategy;
+  remediation?: VerificationRemediationPlan;
   resume: ResumeState;
   readiness: ReadinessState;
   recentEvents: ResumeState["recentEvents"];
@@ -446,6 +448,48 @@ export interface VerificationStrategy {
   suggestions: VerificationSuggestion[];
   updatedAt: string;
   sources: string[];
+}
+
+export type VerificationRemediationStatus = "not_required" | "planned" | "active" | "resolved" | "stopped";
+export type VerificationRemediationAttemptStatus = "in_progress" | "passed" | "failed" | "stopped";
+
+export interface VerificationRemediationFailedCheck {
+  id: string;
+  timestamp: string;
+  command?: string;
+  toolName: string;
+  summary?: string;
+}
+
+export interface VerificationRemediationAttempt {
+  id: string;
+  status: VerificationRemediationAttemptStatus;
+  startedAt: string;
+  updatedAt: string;
+  failedCheckIds: string[];
+  commands: string[];
+  note?: string;
+  evidence?: string;
+}
+
+export interface VerificationRemediationPlan {
+  taskId: string;
+  status: VerificationRemediationStatus;
+  generatedAt: string;
+  updatedAt: string;
+  generatedFrom?: string;
+  maxAttempts: number;
+  summary: string;
+  failedChecks: VerificationRemediationFailedCheck[];
+  nextActions: string[];
+  stopConditions: string[];
+  attempts: VerificationRemediationAttempt[];
+}
+
+export interface VerificationRemediationAttemptResult {
+  status: "started" | "updated" | "missing" | "not_required" | "limit_reached" | "no_active_attempt";
+  plan?: VerificationRemediationPlan;
+  attempt?: VerificationRemediationAttempt;
 }
 
 export type AcceptanceStatus = "open" | "done" | "blocked";
@@ -1468,18 +1512,19 @@ export async function writeTaskInfo(
   root: string,
   task: TaskState,
   reason = "update",
-  options: { force?: boolean; refreshSubtasks?: boolean; refreshRoles?: boolean } = {},
+  options: { force?: boolean; refreshSubtasks?: boolean; refreshRoles?: boolean; refreshRemediation?: boolean } = {},
 ): Promise<string> {
   const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
   await mkdir(taskDir, { recursive: true });
   const infoPath = path.join(taskDir, "info.md");
   const existing = await readTaskInfo(root, task.id);
   const currentTask = await loadTask(root, task.id) || task;
-  if (existing !== undefined && !options.force && (options.refreshSubtasks || options.refreshRoles)) {
+  if (existing !== undefined && !options.force && (options.refreshSubtasks || options.refreshRoles || options.refreshRemediation)) {
     const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
     const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
     const roles = await readRoleOrchestration(root, currentTask.id);
-    const content = updateTaskInfoGeneratedSections(existing, subtaskSummary, subtaskPlan, roles);
+    const remediation = await readVerificationRemediationPlan(root, currentTask.id);
+    const content = updateTaskInfoGeneratedSections(existing, subtaskSummary, subtaskPlan, roles, remediation);
     await writeFile(infoPath, content, "utf8");
     return content;
   }
@@ -1494,23 +1539,27 @@ export async function writeTaskInfo(
   const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
   const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
   const roles = await readRoleOrchestration(root, currentTask.id);
-  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, subtaskPlan, roles, reason);
+  const remediation = await readVerificationRemediationPlan(root, currentTask.id);
+  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, subtaskPlan, roles, remediation, reason);
   await writeFile(infoPath, content, "utf8");
   return content;
 }
 
-function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string, subtaskPlan: SubtaskPlan | undefined, roles?: RoleOrchestrationPlan): string {
+function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string, subtaskPlan: SubtaskPlan | undefined, roles?: RoleOrchestrationPlan, remediation?: VerificationRemediationPlan): string {
   return updateTaskInfoSection(
     updateTaskInfoSection(
-      updateTaskInfoSection(content, "Subtasks", subtaskSummary),
-      "Subtask Plan",
-      subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
+      updateTaskInfoSection(
+        updateTaskInfoSection(content, "Subtasks", subtaskSummary),
+        "Subtask Plan",
+        subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
+      ),
+      "Role Orchestration",
+      roles ? formatRoleOrchestrationSummary(roles, 3) : "No role orchestration plan recorded yet.",
     ),
-    "Role Orchestration",
-    roles ? formatRoleOrchestrationSummary(roles, 3) : "No role orchestration plan recorded yet.",
+    "Verification Remediation",
+    remediation ? formatVerificationRemediationSummary(remediation) : "No verification remediation loop recorded yet.",
   );
 }
-
 function updateTaskInfoSection(content: string, title: string, body: string): string {
   const section = `## ${title}\n\n${body}\n`;
   const sectionPattern = new RegExp(`(^## ${escapeRegExp(title)}\\r?\\n\\r?\\n)([\\s\\S]*?)(?=\\r?\\n## |\\s*$)`, "m");
@@ -2990,6 +3039,287 @@ export async function readVerificationStrategy(root: string, taskId: string): Pr
   }
 }
 
+export async function readVerificationRemediationPlan(root: string, taskId: string): Promise<VerificationRemediationPlan | undefined> {
+  const file = path.join(getProjectPaths(root).tasksDir, taskId, "verification-remediation.json");
+  if (!(await pathExists(file))) return undefined;
+  try {
+    return normalizeVerificationRemediationPlan(JSON.parse(await readFile(file, "utf8")) as Partial<VerificationRemediationPlan>);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writeVerificationRemediationPlan(root: string, task: TaskState, reason = "manual", maxAttempts = 3): Promise<VerificationRemediationPlan> {
+  const currentTask = await loadTask(root, task.id) || task;
+  const existing = await readVerificationRemediationPlan(root, currentTask.id);
+  const verification = await readVerification(root, currentTask.id);
+  const failedChecks = verification.checks.filter(check => !check.success).slice(-8).map(toRemediationFailedCheck);
+  const attempts = existing?.attempts || [];
+  const now = new Date().toISOString();
+  const plan = normalizeVerificationRemediationPlan({
+    taskId: currentTask.id,
+    status: deriveRemediationStatus(failedChecks, attempts, maxAttempts),
+    generatedAt: existing?.generatedAt || now,
+    updatedAt: now,
+    generatedFrom: reason,
+    maxAttempts,
+    summary: summarizeVerificationRemediation(failedChecks, attempts, maxAttempts),
+    failedChecks,
+    nextActions: buildRemediationNextActions(failedChecks),
+    stopConditions: buildRemediationStopConditions(maxAttempts),
+    attempts,
+  }) || {
+    taskId: currentTask.id,
+    status: "not_required",
+    generatedAt: now,
+    updatedAt: now,
+    generatedFrom: reason,
+    maxAttempts,
+    summary: "No failed verification checks require remediation.",
+    failedChecks: [],
+    nextActions: [],
+    stopConditions: buildRemediationStopConditions(maxAttempts),
+    attempts: [],
+  };
+  await persistVerificationRemediationPlan(root, currentTask, plan);
+  await appendTaskEvent(root, currentTask.id, {
+    type: "verification_remediation_planned",
+    timestamp: now,
+    data: { reason, status: plan.status, failedChecks: plan.failedChecks.length, attempts: plan.attempts.length },
+  });
+  return plan;
+}
+
+export async function startVerificationRemediationAttempt(root: string, taskId: string, note?: string): Promise<VerificationRemediationAttemptResult> {
+  const task = await loadTask(root, taskId);
+  if (!task) return { status: "missing" };
+  const plan = await readVerificationRemediationPlan(root, taskId) || await writeVerificationRemediationPlan(root, task, "attempt_start");
+  if (plan.failedChecks.length === 0) return { status: "not_required", plan };
+  const active = plan.attempts.find(attempt => attempt.status === "in_progress");
+  if (active) return { status: "started", plan, attempt: active };
+  if (plan.attempts.length >= plan.maxAttempts) {
+    const stopped = await persistUpdatedVerificationRemediationPlan(root, task, { ...plan, status: "stopped", summary: summarizeVerificationRemediation(plan.failedChecks, plan.attempts, plan.maxAttempts) }, "attempt_limit");
+    return { status: "limit_reached", plan: stopped };
+  }
+  const now = new Date().toISOString();
+  const attempt: VerificationRemediationAttempt = {
+    id: `R${plan.attempts.length + 1}`,
+    status: "in_progress",
+    startedAt: now,
+    updatedAt: now,
+    failedCheckIds: plan.failedChecks.map(check => check.id),
+    commands: dedupeStrings(plan.failedChecks.map(check => check.command).filter((command): command is string => !!command)),
+    note: note?.trim() || undefined,
+  };
+  const next = await persistUpdatedVerificationRemediationPlan(root, task, {
+    ...plan,
+    status: "active",
+    updatedAt: now,
+    summary: summarizeVerificationRemediation(plan.failedChecks, [...plan.attempts, attempt], plan.maxAttempts),
+    attempts: [...plan.attempts, attempt],
+  }, "attempt_started");
+  await appendTaskEvent(root, task.id, { type: "verification_remediation_attempt_started", timestamp: now, data: attempt });
+  await writeTaskInfo(root, task, "verification_remediation_attempt_started", { refreshRemediation: true });
+  await writeTaskSnapshot(root, task, "verification_remediation_attempt_started");
+  await writeTaskHandoff(root, task, "verification_remediation_attempt_started");
+  return { status: "started", plan: next, attempt };
+}
+
+export async function finishVerificationRemediationAttempt(
+  root: string,
+  taskId: string,
+  status: Exclude<VerificationRemediationAttemptStatus, "in_progress">,
+  evidence?: string,
+): Promise<VerificationRemediationAttemptResult> {
+  const task = await loadTask(root, taskId);
+  if (!task) return { status: "missing" };
+  const plan = await readVerificationRemediationPlan(root, taskId) || await writeVerificationRemediationPlan(root, task, "attempt_finish");
+  const index = findLatestRemediationAttemptIndex(plan.attempts);
+  if (index < 0) return { status: "no_active_attempt", plan };
+  const now = new Date().toISOString();
+  const attempts = plan.attempts.map((attempt, attemptIndex) => attemptIndex === index
+    ? { ...attempt, status, evidence: evidence?.trim() || attempt.evidence, updatedAt: now }
+    : attempt);
+  const nextStatus: VerificationRemediationStatus = status === "passed"
+    ? "resolved"
+    : status === "stopped" || attempts.length >= plan.maxAttempts
+      ? "stopped"
+      : "planned";
+  const next = await persistUpdatedVerificationRemediationPlan(root, task, {
+    ...plan,
+    status: nextStatus,
+    updatedAt: now,
+    summary: summarizeVerificationRemediation(plan.failedChecks, attempts, plan.maxAttempts),
+    attempts,
+  }, "attempt_finished");
+  await appendTaskEvent(root, task.id, { type: "verification_remediation_attempt_finished", timestamp: now, data: { attemptId: attempts[index]?.id, status, evidence } });
+  await writeTaskInfo(root, task, "verification_remediation_attempt_finished", { refreshRemediation: true });
+  await writeTaskSnapshot(root, task, "verification_remediation_attempt_finished");
+  await writeTaskHandoff(root, task, "verification_remediation_attempt_finished");
+  return { status: "updated", plan: next, attempt: attempts[index] };
+}
+
+export function formatVerificationRemediationPlan(plan: VerificationRemediationPlan): string {
+  return [
+    "# Verification Remediation Loop",
+    "",
+    `Task: ${plan.taskId}`,
+    `Status: ${plan.status}`,
+    `Updated: ${plan.updatedAt}`,
+    `Attempts: ${plan.attempts.length}/${plan.maxAttempts}`,
+    "",
+    "## Summary",
+    "",
+    plan.summary,
+    "",
+    "## Failed Checks",
+    "",
+    plan.failedChecks.length > 0 ? plan.failedChecks.map(check => `- ${check.id}: ${check.command || check.toolName}${check.summary ? ` - ${summarizeUnknown(check.summary, 180)}` : ""}`).join("\n") : "No failed checks recorded.",
+    "",
+    "## Next Actions",
+    "",
+    formatResumeList(plan.nextActions, "No next remediation actions recorded."),
+    "",
+    "## Stop Conditions",
+    "",
+    formatResumeList(plan.stopConditions, "No stop conditions recorded."),
+    "",
+    "## Attempts",
+    "",
+    plan.attempts.length > 0 ? plan.attempts.map(formatRemediationAttempt).join("\n") : "No remediation attempts recorded.",
+    "",
+  ].join("\n");
+}
+
+export function formatVerificationRemediationSummary(plan: VerificationRemediationPlan): string {
+  return `remediation: ${plan.status}, ${plan.failedChecks.length} failed check(s), attempts ${plan.attempts.length}/${plan.maxAttempts}`;
+}
+
+async function persistUpdatedVerificationRemediationPlan(root: string, task: TaskState, plan: VerificationRemediationPlan, reason: string): Promise<VerificationRemediationPlan> {
+  const next = normalizeVerificationRemediationPlan({ ...plan, updatedAt: new Date().toISOString(), generatedFrom: reason }) || plan;
+  await persistVerificationRemediationPlan(root, task, next);
+  return next;
+}
+
+async function persistVerificationRemediationPlan(root: string, task: TaskState, plan: VerificationRemediationPlan): Promise<void> {
+  const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
+  await mkdir(taskDir, { recursive: true });
+  await writeFile(path.join(taskDir, "verification-remediation.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+  await writeFile(path.join(taskDir, "verification-remediation.md"), formatVerificationRemediationPlan(plan), "utf8");
+}
+
+function normalizeVerificationRemediationPlan(value: Partial<VerificationRemediationPlan> | undefined): VerificationRemediationPlan | undefined {
+  if (!value || typeof value.taskId !== "string" || typeof value.generatedAt !== "string" || typeof value.updatedAt !== "string") return undefined;
+  const maxAttempts = typeof value.maxAttempts === "number" && Number.isFinite(value.maxAttempts) ? Math.max(1, Math.min(10, Math.round(value.maxAttempts))) : 3;
+  const failedChecks = Array.isArray(value.failedChecks) ? value.failedChecks.map(normalizeRemediationFailedCheck).filter((check): check is VerificationRemediationFailedCheck => !!check).slice(0, 8) : [];
+  const attempts = Array.isArray(value.attempts) ? value.attempts.map(normalizeRemediationAttempt).filter((attempt): attempt is VerificationRemediationAttempt => !!attempt).slice(0, maxAttempts) : [];
+  const status = isVerificationRemediationStatus(value.status) ? value.status : deriveRemediationStatus(failedChecks, attempts, maxAttempts);
+  return {
+    taskId: value.taskId,
+    status,
+    generatedAt: value.generatedAt,
+    updatedAt: value.updatedAt,
+    generatedFrom: typeof value.generatedFrom === "string" ? value.generatedFrom : undefined,
+    maxAttempts,
+    summary: typeof value.summary === "string" && value.summary.trim() ? value.summary : summarizeVerificationRemediation(failedChecks, attempts, maxAttempts),
+    failedChecks,
+    nextActions: normalizeStringArray(value.nextActions).slice(0, 8),
+    stopConditions: normalizeStringArray(value.stopConditions).slice(0, 8),
+    attempts,
+  };
+}
+
+function normalizeRemediationFailedCheck(value: unknown): VerificationRemediationFailedCheck | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || typeof record.timestamp !== "string" || typeof record.toolName !== "string") return undefined;
+  return {
+    id: record.id,
+    timestamp: record.timestamp,
+    toolName: record.toolName,
+    command: typeof record.command === "string" && record.command.trim() ? record.command.trim() : undefined,
+    summary: typeof record.summary === "string" && record.summary.trim() ? record.summary.trim() : undefined,
+  };
+}
+
+function normalizeRemediationAttempt(value: unknown): VerificationRemediationAttempt | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.id !== "string" || !isVerificationRemediationAttemptStatus(record.status) || typeof record.startedAt !== "string" || typeof record.updatedAt !== "string") return undefined;
+  return {
+    id: record.id,
+    status: record.status,
+    startedAt: record.startedAt,
+    updatedAt: record.updatedAt,
+    failedCheckIds: normalizeStringArray(record.failedCheckIds).slice(0, 8),
+    commands: normalizeStringArray(record.commands).slice(0, 8),
+    note: typeof record.note === "string" && record.note.trim() ? record.note.trim() : undefined,
+    evidence: typeof record.evidence === "string" && record.evidence.trim() ? record.evidence.trim() : undefined,
+  };
+}
+
+function toRemediationFailedCheck(check: VerificationCheck): VerificationRemediationFailedCheck {
+  return {
+    id: check.id,
+    timestamp: check.timestamp,
+    toolName: check.toolName,
+    command: check.command,
+    summary: check.summary,
+  };
+}
+
+function deriveRemediationStatus(failedChecks: VerificationRemediationFailedCheck[], attempts: VerificationRemediationAttempt[], maxAttempts: number): VerificationRemediationStatus {
+  if (failedChecks.length === 0) return attempts.some(attempt => attempt.status === "passed") ? "resolved" : "not_required";
+  if (attempts.some(attempt => attempt.status === "in_progress")) return "active";
+  if (attempts.some(attempt => attempt.status === "passed")) return "resolved";
+  if (attempts.length >= maxAttempts || attempts.some(attempt => attempt.status === "stopped")) return "stopped";
+  return "planned";
+}
+
+function buildRemediationNextActions(failedChecks: VerificationRemediationFailedCheck[]): string[] {
+  if (failedChecks.length === 0) return [];
+  const commands = dedupeStrings(failedChecks.map(check => check.command).filter((command): command is string => !!command));
+  return [
+    "Inspect the latest failed check output and affected files before editing.",
+    "Apply the smallest source fix that addresses the failure cause; do not suppress the check.",
+    commands.length > 0 ? `After the fix, rerun: ${commands.join(" && ")}` : "After the fix, rerun the failed verification command.",
+    "Record the attempt result with /verify:remediate --pass or --fail and include evidence.",
+  ];
+}
+
+function buildRemediationStopConditions(maxAttempts: number): string[] {
+  return [
+    `Stop after ${maxAttempts} failed remediation attempt(s).`,
+    "Stop if the next action requires destructive commands or broad unrelated edits.",
+    "Stop if the failure is flaky or environment-only and record evidence instead of guessing.",
+    "Stop when the failed command passes and mark the attempt with evidence.",
+  ];
+}
+
+function summarizeVerificationRemediation(failedChecks: VerificationRemediationFailedCheck[], attempts: VerificationRemediationAttempt[], maxAttempts: number): string {
+  if (failedChecks.length === 0) return attempts.some(attempt => attempt.status === "passed") ? "Verification remediation resolved." : "No failed verification checks require remediation.";
+  return `${failedChecks.length} failed check(s), ${attempts.length}/${maxAttempts} remediation attempt(s) recorded.`;
+}
+
+function formatRemediationAttempt(attempt: VerificationRemediationAttempt): string {
+  return `- ${attempt.id} [${attempt.status}] ${attempt.commands.join(", ") || "no command"}${attempt.note ? ` - ${attempt.note}` : ""}${attempt.evidence ? `; evidence: ${attempt.evidence}` : ""}`;
+}
+
+function findLatestRemediationAttemptIndex(attempts: VerificationRemediationAttempt[]): number {
+  const active = attempts.findLastIndex(attempt => attempt.status === "in_progress");
+  return active >= 0 ? active : attempts.length - 1;
+}
+
+function isVerificationRemediationStatus(value: unknown): value is VerificationRemediationStatus {
+  return value === "not_required" || value === "planned" || value === "active" || value === "resolved" || value === "stopped";
+}
+
+function isVerificationRemediationAttemptStatus(value: unknown): value is VerificationRemediationAttemptStatus {
+  return value === "in_progress" || value === "passed" || value === "failed" || value === "stopped";
+}
+
+
+
 export async function refreshVerificationStrategy(root: string, taskId: string): Promise<VerificationStrategy> {
   const strategy = await detectVerificationStrategy(root);
   const taskDir = path.join(getProjectPaths(root).tasksDir, taskId);
@@ -3371,9 +3701,10 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const subtaskSummary = task ? await formatSubtaskTreeSummary(root, task, 8) : undefined;
   const subtaskPlan = task ? await readSubtaskPlan(root, task.id) : undefined;
   const roles = task ? await readRoleOrchestration(root, task.id) : undefined;
+  const remediation = snapshot?.remediation || (task ? await readVerificationRemediationPlan(root, task.id) : undefined);
   const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, subtaskSummary, subtaskPlan, roles, research, info, upstreamReport);
-  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, subtaskPlan, roles, research, info, upstreamReport, content };
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, remediation, handoff, resume, readiness, snapshot, clarification, subtaskSummary, subtaskPlan, roles, research, info, upstreamReport);
+  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, remediation, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, subtaskPlan, roles, research, info, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -3383,6 +3714,7 @@ export function formatContextBundle(
   acceptance?: AcceptanceState,
   plan?: PlanState,
   verificationStrategy?: VerificationStrategy,
+  remediation?: VerificationRemediationPlan,
   handoff?: string,
   resume?: ResumeState,
   readiness?: ReadinessState,
@@ -3426,6 +3758,9 @@ export function formatContextBundle(
     }
     if (roles) {
       lines.push("", "Role orchestration:", formatRoleOrchestrationSummary(roles, 3));
+    }
+    if (remediation) {
+      lines.push("", "Verification remediation:", formatVerificationRemediationSummary(remediation));
     }
     if (acceptance) {
       lines.push("", "Acceptance:", formatAcceptanceSummary(acceptance, 6));
@@ -4051,6 +4386,7 @@ function formatTaskInfo(
   subtaskSummary: string,
   subtaskPlan: SubtaskPlan | undefined,
   roles: RoleOrchestrationPlan | undefined,
+  remediation: VerificationRemediationPlan | undefined,
   reason: string,
 ): string {
   return [
@@ -4082,6 +4418,10 @@ function formatTaskInfo(
     "## Subtask Plan",
     "",
     subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
+    "",
+    "## Verification Remediation",
+    "",
+    remediation ? formatVerificationRemediationSummary(remediation) : "No verification remediation loop recorded yet.",
     "",
     "## Research",
     "",
@@ -4845,6 +5185,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
   const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
   const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
   const roles = await readRoleOrchestration(root, currentTask.id);
+  const remediation = await readVerificationRemediationPlan(root, currentTask.id);
   const recentEvents = events.slice(-20).map(event => ({
     type: event.type,
     timestamp: event.timestamp,
@@ -4863,6 +5204,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     plan,
     verification,
     verificationStrategy,
+    remediation,
     resume,
     readiness,
     recentEvents,
@@ -4936,6 +5278,10 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "",
     formatVerificationSuggestions(snapshot.verificationStrategy, 8),
     "",
+    "## Verification Remediation",
+    "",
+    snapshot.remediation ? formatVerificationRemediationSummary(snapshot.remediation) : "No verification remediation loop recorded yet.",
+    "",
     "## Research",
     "",
     snapshot.research ? formatResearchSummary(snapshot.research, 8) : "No research artifact recorded yet.",
@@ -4974,6 +5320,7 @@ export function formatSnapshotSummary(snapshot: TaskSnapshot): string {
     snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `subtasks: ${snapshot.subtasks.split(/\r?\n/)[0]}` : undefined,
     snapshot.subtaskPlan && snapshot.subtaskPlan.items.length > 0 ? `subtask plan: ${countSubtaskPlanItems(snapshot.subtaskPlan.items).suggested} suggested` : undefined,
     snapshot.roles ? `roles: ${formatRoleOrchestrationSummary(snapshot.roles, 3).split(/\r?\n/)[0]}` : undefined,
+    snapshot.remediation ? formatVerificationRemediationSummary(snapshot.remediation) : undefined,
     snapshot.clarification ? `clarification: ${snapshot.clarification.status}` : undefined,
     `acceptance: ${snapshot.acceptance.items.filter(item => item.status === "done").length}/${snapshot.acceptance.items.length} done`,
     `verification: ${snapshot.verification.checks.length} check(s)`,
@@ -4991,6 +5338,7 @@ function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
     snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `- subtasks: ${snapshot.subtasks.replace(/\r?\n/g, "; ")}` : "- subtasks: none",
     snapshot.subtaskPlan && snapshot.subtaskPlan.items.length > 0 ? `- subtask plan: ${formatSubtaskPlanSummary(snapshot.subtaskPlan, 4).replace(/\r?\n/g, "; ")}` : "- subtask plan: none",
     snapshot.roles ? `- roles: ${formatRoleOrchestrationSummary(snapshot.roles, 3).replace(/\r?\n/g, "; ")}` : "- roles: none",
+    snapshot.remediation ? `- remediation: ${formatVerificationRemediationSummary(snapshot.remediation)}` : "- remediation: none",
     snapshot.clarification ? `- clarification: ${snapshot.clarification.status}, ${openClarificationQuestions(snapshot.clarification).length} open` : "- clarification: none",
     `- touched files: ${snapshot.touchedFiles.slice(0, 8).join(", ") || "none inferred"}`,
   ].join("\n");

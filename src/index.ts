@@ -14,6 +14,7 @@ import {
   ensureProject,
   findProjectRoot,
   finishActiveTask,
+  finishVerificationRemediationAttempt,
   formatAcceptanceSummary,
   formatClarificationPrompt,
   formatClarificationSummary,
@@ -21,6 +22,7 @@ import {
   formatProjectOverviewSummary,
   formatReadinessSummary,
   formatResearchSummary,
+  formatVerificationRemediationSummary,
   formatSnapshotSummary,
   formatSpecProposalSummary,
   formatSubtaskPlanSummary,
@@ -50,6 +52,7 @@ import {
   readTaskReadiness,
   readTaskResearch,
   readVerificationStrategy,
+  readVerificationRemediationPlan,
   readVerification,
   refreshVerificationStrategy,
   recordToolEvent,
@@ -60,6 +63,7 @@ import {
   shouldCaptureClarificationAnswer,
   skipTaskClarification,
   startTaskClarification,
+  startVerificationRemediationAttempt,
   summarizeUnknown,
   finishTaskClarification,
   updateRoleOrchestrationStatus,
@@ -74,6 +78,7 @@ import {
   updateUpstreamSource,
   writeProjectOverview,
   writeTurnJournal,
+  writeVerificationRemediationPlan,
   writeUpstreamSyncReport,
   formatPlanSummary,
   formatTaskResume,
@@ -872,6 +877,45 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("verify:remediate", {
+    description: "Show or advance the opt-in verification remediation loop",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parsed = parseVerificationRemediationArgs(args);
+      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      if (parsed.action === "start") {
+        const result = await startVerificationRemediationAttempt(root, task.id, parsed.note);
+        await writeTaskInfo(root, task, "verification_remediation_started", { refreshRemediation: true });
+        await writeTaskSnapshot(root, task, "verification_remediation_started");
+        await writeTaskHandoff(root, task, "verification_remediation_started");
+        ctx.ui.notify(result.plan ? formatVerificationRemediationSummary(result.plan) : `Could not start remediation for ${task.id}.`, result.status === "limit_reached" ? "warning" : "info");
+        return;
+      }
+      if (parsed.action === "pass" || parsed.action === "fail" || parsed.action === "stop") {
+        const status = parsed.action === "pass" ? "passed" : parsed.action === "fail" ? "failed" : "stopped";
+        const result = await finishVerificationRemediationAttempt(root, task.id, status, parsed.note);
+        await writeTaskInfo(root, task, "verification_remediation_finished", { refreshRemediation: true });
+        await writeTaskSnapshot(root, task, "verification_remediation_finished");
+        await writeTaskHandoff(root, task, "verification_remediation_finished");
+        ctx.ui.notify(result.plan ? formatVerificationRemediationSummary(result.plan) : `Could not update remediation for ${task.id}.`, result.status === "no_active_attempt" || status !== "passed" ? "warning" : "info");
+        return;
+      }
+      const remediation = parsed.action === "refresh"
+        ? await writeVerificationRemediationPlan(root, task, "command_refresh")
+        : (await readVerificationRemediationPlan(root, task.id)) || await writeVerificationRemediationPlan(root, task, "command");
+      if (parsed.action === "refresh") {
+        await writeTaskInfo(root, task, "verification_remediation_refreshed", { refreshRemediation: true });
+        await writeTaskSnapshot(root, task, "verification_remediation_refreshed");
+        await writeTaskHandoff(root, task, "verification_remediation_refreshed");
+      }
+      ctx.ui.notify(formatVerificationRemediationSummary(remediation), remediation.status === "stopped" ? "warning" : "info");
+    },
+  });
+
   pi.registerCommand("acceptance:status", {
     description: "Show acceptance criteria for the active Project Flow task",
     handler: async (args, ctx) => {
@@ -1362,6 +1406,27 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
 
   function isSubtaskModeArg(value: string | undefined): value is AutoSubtaskMode {
     return value === "off" || value === "suggest" || value === "auto";
+  }
+
+  function parseVerificationRemediationArgs(args: string): { action: "show" | "refresh" | "start" | "pass" | "fail" | "stop"; query: string; note?: string } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    let action: "show" | "refresh" | "start" | "pass" | "fail" | "stop" = "show";
+    const queryParts: string[] = [];
+    const noteParts: string[] = [];
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      if (part === "--refresh" || part === "refresh") {
+        action = "refresh";
+        continue;
+      }
+      if (part === "--start" || part === "start" || part === "--pass" || part === "pass" || part === "--fail" || part === "fail" || part === "--stop" || part === "stop") {
+        action = part.includes("start") ? "start" : part.includes("pass") ? "pass" : part.includes("fail") ? "fail" : "stop";
+        noteParts.push(...parts.slice(i + 1));
+        break;
+      }
+      queryParts.push(part);
+    }
+    return { action, query: queryParts.join(" "), note: noteParts.join(" ").trim() || undefined };
   }
 
 

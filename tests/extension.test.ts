@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import projectFlowExtension from "../src/index";
-import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readRoleOrchestration, readSubtaskPlan, readTaskClarification, readTaskResearch, readVerification } from "../src/core";
+import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readRoleOrchestration, readSubtaskPlan, readTaskClarification, readTaskResearch, readVerification, readVerificationRemediationPlan, recordVerification } from "../src/core";
 
 type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
@@ -527,10 +527,31 @@ describe("project flow extension", () => {
 
       const task = await createTask(root, "implement snapshot command\n- 验收: snapshot command works");
       await fake.commands.get("task:snapshot").handler("", fake.ctx(root));
-
       expect(fake.notifications.at(-1)?.message).toContain(task.id);
       expect(fake.notifications.at(-1)?.message).toContain("next action:");
       expect(fake.notifications.at(-1)?.message).toContain("readiness:");
+    });
+  });
+
+  test("starts verification remediation through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+      const task = await createTask(root, "fix verification command failures");
+      await recordVerification(root, task.id, {
+        id: "fail-1",
+        timestamp: "2026-06-09T00:00:00.000Z",
+        toolName: "bash",
+        command: "bun test",
+        success: false,
+        summary: "failed assertion",
+      });
+
+      await fake.commands.get("verify:remediate").handler("--start first attempt", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("active");
+      const plan = await readVerificationRemediationPlan(root, task.id);
+      expect(plan?.attempts[0]?.status).toBe("in_progress");
+      expect(plan?.attempts[0]?.note).toBe("first attempt");
     });
   });
 

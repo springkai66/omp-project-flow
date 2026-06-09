@@ -132,6 +132,7 @@ Commands are escape hatches and diagnostics:
 /verify:status [id-prefix-or-title]
 /verify:suggest [id-prefix-or-title]
 /verify:refresh [id-prefix-or-title]
+/verify:remediate [--refresh|--start|--pass|--fail|--stop] [id-prefix-or-title] [note]
 /acceptance:status [id-prefix-or-title]
 /acceptance:done <id> [evidence]
 /acceptance:block <id> [reason]
@@ -208,6 +209,8 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
       events.jsonl
       verification.json
       verification-strategy.json
+      verification-remediation.json
+      verification-remediation.md
   workflow/
     active-task.json
 ```
@@ -218,7 +221,7 @@ Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId`
 
 Role orchestration records role prompts, owned artifacts, expected outputs, and role-local checks for research, implementation, and verification/review. It does not launch independent agents by itself; it provides explicit handoff packets and status tracking so a main OMP session or manually launched role agent can execute without guessing ownership.
 
-Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`.
+Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`. When checks fail, `/verify:remediate` creates an opt-in loop with failed check evidence, bounded attempts, stop conditions, and explicit pass/fail/stop status. It never runs fix or verification commands silently; the loop records what the agent/user chose to do and what evidence came back.
 
 Spec proposals are saved for review under `.project-flow/spec-proposals/`. They are not applied to `.project-flow/spec/` unless you explicitly run `/spec:apply`.
 
@@ -248,6 +251,12 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.19.0
+
+- Added opt-in verification remediation loop artifacts and `/verify:remediate`.
+- Remediation attempts now track failed checks, rerun commands, evidence, attempt limits, and stop conditions.
+- Remediation summaries now appear in task info, snapshots, and hidden context.
 
 ### 0.18.0
 

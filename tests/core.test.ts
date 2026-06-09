@@ -27,6 +27,7 @@ import {
   readAcceptance,
   refreshSubtaskPlanArtifacts,
   readRoleOrchestration,
+  readVerificationRemediationPlan,
   readSubtaskPlan,
   readTaskReadiness,
   readTaskResume,
@@ -39,7 +40,11 @@ import {
   readUpstreamSyncReport,
   readVerification,
   readVerificationStrategy,
+  recordVerification,
   refreshVerificationStrategy,
+  writeVerificationRemediationPlan,
+  startVerificationRemediationAttempt,
+  finishVerificationRemediationAttempt,
   recordToolEvent,
   readSpecDocuments,
   resolveTask,
@@ -650,6 +655,55 @@ describe("project flow core", () => {
 
       const refreshed = await refreshVerificationStrategy(root, task.id);
       expect(refreshed.suggestions[0]?.id).toBe("V1");
+    });
+  });
+
+  test("builds an opt-in remediation plan from failed verification", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "fix failed verification loop\n- Acceptance: plan remediation attempts");
+      await recordVerification(root, task.id, {
+        id: "fail-1",
+        timestamp: "2026-06-09T00:00:00.000Z",
+        toolName: "bash",
+        command: "bun test",
+        success: false,
+        summary: "one assertion failed",
+      });
+
+      const plan = await writeVerificationRemediationPlan(root, task, "test");
+      expect(plan.status).toBe("planned");
+      expect(plan.maxAttempts).toBe(3);
+      expect(plan.failedChecks[0]?.command).toBe("bun test");
+      expect(plan.nextActions.some(action => action.includes("rerun"))).toBe(true);
+      const stored = await readVerificationRemediationPlan(root, task.id);
+      expect(stored?.summary).toContain("1 failed check");
+    });
+  });
+
+  test("tracks remediation attempts and stops at the attempt limit", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "limit verification remediation attempts");
+      await recordVerification(root, task.id, {
+        id: "fail-1",
+        timestamp: "2026-06-09T00:00:00.000Z",
+        toolName: "bash",
+        command: "bun run check",
+        success: false,
+      });
+
+      const first = await startVerificationRemediationAttempt(root, task.id, "first fix attempt");
+      expect(first.status).toBe("started");
+      expect(first.plan?.status).toBe("active");
+      expect(first.attempt?.commands).toContain("bun run check");
+      await finishVerificationRemediationAttempt(root, task.id, "failed", "still failing");
+      await startVerificationRemediationAttempt(root, task.id);
+      await finishVerificationRemediationAttempt(root, task.id, "failed", "still failing");
+      await startVerificationRemediationAttempt(root, task.id);
+      const stopped = await finishVerificationRemediationAttempt(root, task.id, "failed", "third failure");
+      expect(stopped.plan?.status).toBe("stopped");
+      expect(stopped.plan?.attempts).toHaveLength(3);
     });
   });
 
