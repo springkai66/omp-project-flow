@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ActiveTaskScope, AutoSubtaskMode, ClarificationState, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
+import type { ActiveTaskScope, AutoSubtaskMode, ClarificationAxis, ClarificationState, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
@@ -63,6 +63,7 @@ import {
   shouldCaptureClarificationAnswer,
   skipTaskClarification,
   startTaskClarification,
+  startPrdRefinement,
   startVerificationRemediationAttempt,
   summarizeUnknown,
   finishTaskClarification,
@@ -621,6 +622,26 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("prd:refine", {
+    description: "Run the focused PRD refinement loop for a Project Flow task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parsed = parsePrdRefineArgs(args);
+      const task = await getTaskFromArgsOrActive(root, parsed.query, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const state = await startPrdRefinement(root, task.id, { maxQuestions: parsed.maxQuestions, requiredAxes: parsed.requiredAxes });
+      if (!state) {
+        ctx.ui.notify(`Could not start PRD refinement for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(formatClarificationSummary(state, 12), state.status === "collecting" ? "warning" : "info");
+      sendClarificationPrompt(pi, task, state);
+    },
+  });
+
   pi.registerCommand("research:status", {
     description: "Show Project Flow research notes for a task",
     handler: async (args, ctx) => {
@@ -1159,7 +1180,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     if (!trimmed || trimmed === "--status") {
       const state = await readTaskClarification(root, task.id);
       if (!state) {
-        ctx.ui.notify(`No clarification artifact recorded for ${task.id}. Use /clarify:start to enable one.`, "info");
+        ctx.ui.notify(`No clarification artifact recorded for ${task.id}. Use /clarify:start or /prd:refine to enable one.`, "info");
         return;
       }
       ctx.ui.notify(formatClarificationSummary(state, 12), "info");
@@ -1174,6 +1195,17 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         return;
       }
       ctx.ui.notify(formatClarificationSummary(state, 12), "info");
+      sendClarificationPrompt(pi, task, state);
+      return;
+    }
+
+    if (trimmed === "--refine") {
+      const state = await startPrdRefinement(root, task.id);
+      if (!state) {
+        ctx.ui.notify(`Could not start PRD refinement for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(formatClarificationSummary(state, 12), state.status === "collecting" ? "warning" : "info");
       sendClarificationPrompt(pi, task, state);
       return;
     }
@@ -1470,6 +1502,53 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       queryParts.push(part);
     }
     return { query: queryParts.join(" "), maxQuestions };
+  }
+
+  function parsePrdRefineArgs(args: string): { query: string; maxQuestions?: number; requiredAxes?: ClarificationAxis[] } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    let maxQuestions: number | undefined;
+    const axes: ClarificationAxis[] = [];
+    const queryParts: string[] = [];
+    for (let index = 0; index < parts.length; index += 1) {
+      const part = parts[index];
+      if (part === "--max") {
+        const next = Number(parts[index + 1]);
+        if (Number.isFinite(next)) maxQuestions = next;
+        index += 1;
+        continue;
+      }
+      if (part.startsWith("--max=")) {
+        const next = Number(part.slice("--max=".length));
+        if (Number.isFinite(next)) maxQuestions = next;
+        continue;
+      }
+      if ((part === "--axes" || part === "--axis") && parts[index + 1]) {
+        axes.push(...parseClarificationAxes(parts[index + 1]));
+        index += 1;
+        continue;
+      }
+      if (part.startsWith("--axes=") || part.startsWith("--axis=")) {
+        axes.push(...parseClarificationAxes(part.slice(part.indexOf("=") + 1)));
+        continue;
+      }
+      queryParts.push(part);
+    }
+    return { query: queryParts.join(" "), maxQuestions, requiredAxes: axes.length > 0 ? axes : undefined };
+  }
+
+  function parseClarificationAxes(value: string): ClarificationAxis[] {
+    return value.split(",").map(item => item.trim()).filter(isClarificationAxisArg);
+  }
+
+  function isClarificationAxisArg(value: string): value is ClarificationAxis {
+    return value === "goal" ||
+      value === "scope" ||
+      value === "users" ||
+      value === "acceptance" ||
+      value === "constraints" ||
+      value === "non_goals" ||
+      value === "verification" ||
+      value === "risk";
   }
 
   function parseClarifyFinishArgs(args: string): { force?: boolean; note?: string } {

@@ -114,7 +114,7 @@ Commands are escape hatches and diagnostics:
 /task:tree [id-prefix-or-title]
 /task:subtasks [--refresh|--apply] [--mode off|suggest|auto] [id-prefix-or-title]
 /task:roles [--refresh|--start|--done|--block <research|implement|check>] [id-prefix-or-title] [note]
-/task:clarify [answer|--skip note|--finish [--force]]
+/task:clarify [answer|--refine|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
 /clarify:start [id-prefix-or-title] [--max N]
@@ -122,6 +122,7 @@ Commands are escape hatches and diagnostics:
 /clarify:answer <answer>
 /clarify:skip [reason]
 /clarify:finish [--force] [note]
+/prd:refine [id-prefix-or-title] [--axes a,b] [--max N]
 /research:status [id-prefix-or-title]
 /research:add <note>
 /plan:status [id-prefix-or-title]
@@ -154,7 +155,7 @@ Subtask planning policy is controlled by the `autoSubtaskMode` plugin setting: `
 
 Role orchestration handoffs are generated under each task's `roles/` directory. `/task:roles` shows the research/implement/check ownership plan, `/task:roles --refresh` regenerates prompts from current task state, and `/task:roles --start|--done|--block <role> [note]` records role progress while keeping the main OMP runtime in control.
 
-Clarification is automatic when the initial PRD has open questions. While a required clarification loop is collecting, the next normal user reply is recorded as the current answer, and the injected context tells the agent to ask only the next question before planning or implementing. Use `/task:clarify` for the compact command surface, or `/clarify:*` when you want explicit start/status/answer/skip/finish control.
+Clarification is automatic when the initial PRD has open questions. While a required clarification loop is collecting, the next normal user reply is recorded as the current answer, and the injected context tells the agent to ask only the next question before planning or implementing. Use `/task:clarify` for the compact command surface, `/task:clarify --refine` or `/prd:refine` for a focused PRD refinement loop over goal/scope/users/acceptance/constraints/non-goals/verification/risk, or `/clarify:*` when you want explicit start/status/answer/skip/finish control.
 
 The upstream commands are for controlled upgrades when ECC or OMO changes. They refresh the local sync report, mark reviewed upstream references, or create a normal Project Flow task to adapt useful ideas.
 
@@ -254,6 +255,12 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.21.0
+
+- Added focused PRD refinement mode with `/prd:refine` and `/task:clarify --refine`.
+- PRD refinement asks one required-axis question at a time and records answers into the draft PRD.
+- Refined PRD state now appears in clarification artifacts, task PRDs, hidden context, readiness, handoff, and snapshots.
 
 ### 0.20.0
 

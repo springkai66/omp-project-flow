@@ -79,6 +79,7 @@ describe("project flow extension", () => {
       expect(fake.commands.has("clarify:answer")).toBe(true);
       expect(fake.commands.has("clarify:skip")).toBe(true);
       expect(fake.commands.has("clarify:finish")).toBe(true);
+      expect(fake.commands.has("prd:refine")).toBe(true);
       expect(fake.commands.has("research:status")).toBe(true);
       expect(fake.commands.has("research:add")).toBe(true);
       expect(fake.commands.has("verify:status")).toBe(true);
@@ -509,6 +510,26 @@ describe("project flow extension", () => {
       expect(clarification?.questions[0]?.answer).toContain("需要迁移旧数据");
       expect(result?.message?.content).toContain("Clarification loop:");
       expect(result?.message?.content).toContain("status: ready");
+    });
+  });
+
+  test("starts focused PRD refinement from command", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, "implement onboarding PRD");
+      await fake.commands.get("prd:refine").handler("--axes scope,users --max 2", fake.ctx(root));
+
+      const clarification = await readTaskClarification(root, task.id);
+      expect(clarification?.mode).toBe("refine");
+      expect(clarification?.status).toBe("collecting");
+      expect(clarification?.requiredAxes).toEqual(["scope", "users"]);
+      expect(clarification?.currentQuestionId).toBe("C1");
+      expect(fake.notifications.at(-1)?.message).toContain("mode: refine");
+      expect(fake.sentMessages.at(-1)?.message.customType).toBe("project-flow-clarify");
+      expect(fake.sentMessages.at(-1)?.message.content).toContain("Continue Project Flow PRD refinement");
+      expect(fake.sentMessages.at(-1)?.message.content).toContain("Question C1 (scope)");
     });
   });
 

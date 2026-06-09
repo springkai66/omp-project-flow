@@ -114,7 +114,7 @@ omp plugin list
 /task:tree [id-prefix-or-title]
 /task:subtasks [--refresh|--apply] [--mode off|suggest|auto] [id-prefix-or-title]
 /task:roles [--refresh|--start|--done|--block <research|implement|check>] [id-prefix-or-title] [note]
-/task:clarify [answer|--skip note|--finish [--force]]
+/task:clarify [answer|--refine|--skip note|--finish [--force]]
 /task:finish [--force] [note]
 /task:pause [note]
 /clarify:start [id-prefix-or-title] [--max N]
@@ -122,6 +122,7 @@ omp plugin list
 /clarify:answer <answer>
 /clarify:skip [reason]
 /clarify:finish [--force] [note]
+/prd:refine [id-prefix-or-title] [--axes a,b] [--max N]
 /research:status [id-prefix-or-title]
 /research:add <note>
 /plan:status [id-prefix-or-title]
@@ -154,7 +155,7 @@ Subtask 规划策略由 `autoSubtaskMode` 插件设置控制：`off` 禁用新 r
 
 Role orchestration handoff 会写入每个任务的 `roles/` 目录。`/task:roles` 查看 research/implement/check 所有权计划，`/task:roles --refresh` 按当前任务状态重新生成 prompts，`/task:roles --start|--done|--block <role> [note]` 记录角色进度，同时仍由主 OMP runtime 控制执行。
 
-当初始 PRD 有开放问题时，clarification 会自动进入一问一答流程。必需澄清仍在 collecting 时，下一条普通用户输入会被记录为当前问题答案，隐藏上下文会要求 agent 只问下一题，暂不进入计划或实现。日常使用 `/task:clarify` 即可；需要显式控制时可以用 `/clarify:*` 系列命令。
+当初始 PRD 有开放问题时，clarification 会自动进入一问一答流程。必需澄清仍在 collecting 时，下一条普通用户输入会被记录为当前问题答案，隐藏上下文会要求 agent 只问下一题，暂不进入计划或实现。日常使用 `/task:clarify` 即可；`/task:clarify --refine` 或 `/prd:refine` 会围绕 goal/scope/users/acceptance/constraints/non-goals/verification/risk 运行聚焦 PRD refinement；需要显式控制时可以用 `/clarify:*` 系列命令。
 
 上游命令用于 ECC 或 OMO 升级后的受控同步。它们会刷新本地同步报告、标记某个上游版本已审，或创建一个普通 Project Flow 任务来适配有价值的方案。
 
@@ -254,6 +255,12 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.21.0
+
+- 新增 focused PRD refinement mode，命令为 `/prd:refine` 和 `/task:clarify --refine`。
+- PRD refinement 会按 required axis 一次只问一个问题，并把答案写入 draft PRD。
+- Refined PRD 状态现在进入 clarification artifacts、task PRD、隐藏上下文、readiness、handoff 和 snapshots。
 
 ### 0.20.0
 

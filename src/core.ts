@@ -211,6 +211,7 @@ export interface ResearchState {
 
 export type ClarificationStatus = "not_required" | "collecting" | "ready" | "skipped";
 export type ClarificationQuestionStatus = "queued" | "asking" | "answered" | "skipped";
+export type ClarificationMode = "questions" | "refine";
 export type ClarificationAxis =
   | "goal"
   | "scope"
@@ -224,9 +225,12 @@ export type ClarificationAxis =
 export interface ClarifiedPrdDraft {
   goal?: string;
   scope: string[];
+  users: string[];
   nonGoals: string[];
   constraints: string[];
   acceptanceCriteria: string[];
+  verification: string[];
+  risks: string[];
   openQuestions: string[];
 }
 
@@ -246,6 +250,8 @@ export interface ClarificationState {
   enabled: boolean;
   required: boolean;
   status: ClarificationStatus;
+  mode: ClarificationMode;
+  requiredAxes: ClarificationAxis[];
   updatedAt: string;
   generatedFrom?: string;
   currentQuestionId?: string;
@@ -644,6 +650,7 @@ const DEFAULT_CHECKPOINTS: Checkpoint[] = [
 ];
 
 const DEFAULT_CLARIFICATION_MAX_QUESTIONS = 5;
+const DEFAULT_PRD_REFINEMENT_MAX_QUESTIONS = 8;
 
 const DEFAULT_CLARIFICATION_QUESTIONS: Array<{ axis: ClarificationAxis; text: string }> = [
   { axis: "goal", text: "What is the smallest acceptable outcome for this task?" },
@@ -652,6 +659,28 @@ const DEFAULT_CLARIFICATION_QUESTIONS: Array<{ axis: ClarificationAxis; text: st
   { axis: "constraints", text: "Are there compatibility, style, or workflow constraints to preserve?" },
   { axis: "verification", text: "How should the result be verified before the task is considered ready?" },
 ];
+
+const DEFAULT_PRD_REFINEMENT_AXES: ClarificationAxis[] = [
+  "goal",
+  "scope",
+  "users",
+  "acceptance",
+  "constraints",
+  "non_goals",
+  "verification",
+  "risk",
+];
+
+const PRD_REFINEMENT_QUESTIONS: Record<ClarificationAxis, string> = {
+  goal: "What exact outcome should the finished task deliver?",
+  scope: "Which files, commands, or workflow surfaces are in scope?",
+  users: "Who uses this behavior, and what interaction should they see?",
+  acceptance: "What observable acceptance checks prove the PRD is complete?",
+  constraints: "What compatibility, safety, or runtime constraints must be preserved?",
+  non_goals: "What should this PRD explicitly exclude?",
+  verification: "Which command, test, or scenario should verify the result?",
+  risk: "What failure mode or risky edge case should the plan guard against?",
+};
 
 const CODE_WORK_PATTERNS = [
   /\b(add|build|change|check|create|debug|delete|diagnose|fix|implement|inspect|install|integrate|modify|refactor|remove|repair|scan|test|troubleshoot|update|verify)\b/i,
@@ -1393,7 +1422,7 @@ export async function readTaskClarification(root: string, taskId: string): Promi
 export async function startTaskClarification(
   root: string,
   taskId: string,
-  options: { maxQuestions?: number } = {},
+  options: { maxQuestions?: number; mode?: ClarificationMode } = {},
 ): Promise<ClarificationState | undefined> {
   const task = await loadTask(root, taskId);
   if (!task) return undefined;
@@ -1406,6 +1435,7 @@ export async function startTaskClarification(
     required: true,
     maxQuestions,
     seedDefaults: true,
+    mode: options.mode || "questions",
   });
 
   if (existing) {
@@ -1417,6 +1447,8 @@ export async function startTaskClarification(
       enabled: true,
       required: true,
       status: "collecting",
+      mode: options.mode || existing.mode,
+      requiredAxes: existing.requiredAxes.length > 0 ? existing.requiredAxes : dedupeClarificationAxes(questions.map(question => question.axis)),
       maxQuestions,
       questions,
       updatedAt: now,
@@ -1424,7 +1456,46 @@ export async function startTaskClarification(
     }, now);
   }
 
-  await persistClarificationUpdate(root, task, state, "clarification_started", { maxQuestions });
+  await persistClarificationUpdate(root, task, state, "clarification_started", { maxQuestions, mode: state.mode });
+  return state;
+}
+
+export async function startPrdRefinement(
+  root: string,
+  taskId: string,
+  options: { maxQuestions?: number; requiredAxes?: ClarificationAxis[] } = {},
+): Promise<ClarificationState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+
+  const now = new Date().toISOString();
+  const maxQuestions = clampClarificationMax(options.maxQuestions ?? DEFAULT_PRD_REFINEMENT_MAX_QUESTIONS);
+  const requiredAxes = dedupeClarificationAxes(options.requiredAxes || DEFAULT_PRD_REFINEMENT_AXES).slice(0, maxQuestions);
+  const existing = await readTaskClarification(root, task.id);
+  const base = existing || createClarificationState(task.id, extractPrd(task.initialPrompt), now, "prd_refine", {
+    enabled: true,
+    required: true,
+    maxQuestions,
+    mode: "refine",
+    requiredAxes,
+  });
+  const questions = buildPrdRefinementQuestions(base, requiredAxes, now);
+  const hasOpenQuestion = questions.some(question => question.status === "queued" || question.status === "asking");
+  const state = activateNextClarificationQuestion({
+    ...base,
+    enabled: true,
+    required: true,
+    status: hasOpenQuestion ? "collecting" : "ready",
+    mode: "refine",
+    requiredAxes,
+    maxQuestions,
+    questions,
+    currentQuestionId: questions.find(question => question.status === "asking")?.id,
+    updatedAt: now,
+    generatedFrom: "prd_refine",
+  }, now);
+
+  await persistClarificationUpdate(root, task, state, "prd_refinement_started", { maxQuestions, requiredAxes });
   return state;
 }
 
@@ -3931,6 +4002,10 @@ export function summarizeUnknown(value: unknown, max = 500): string {
 }
 
 function formatPrd(task: TaskState, prd: ReturnType<typeof extractPrd>, clarification?: ClarificationState): string {
+  const goal = clarification?.draft.goal || prd.goal;
+  const constraints = clarification ? clarification.draft.constraints : prd.constraints;
+  const acceptance = clarification ? clarification.draft.acceptanceCriteria : prd.acceptanceCriteria;
+  const openQuestions = clarification ? clarification.draft.openQuestions : prd.openQuestions;
   return [
     `# ${task.title}`,
     "",
@@ -3939,23 +4014,43 @@ function formatPrd(task: TaskState, prd: ReturnType<typeof extractPrd>, clarific
     "",
     "## Goal",
     "",
-    prd.goal,
+    goal,
     "",
     "## Original Request",
     "",
     task.initialPrompt,
     "",
+    "## Scope",
+    "",
+    clarification && clarification.draft.scope.length > 0 ? clarification.draft.scope.map(item => `- ${item}`).join("\n") : "- Not clarified.",
+    "",
+    "## Users",
+    "",
+    clarification && clarification.draft.users.length > 0 ? clarification.draft.users.map(item => `- ${item}`).join("\n") : "- Not clarified.",
+    "",
+    "## Non-goals",
+    "",
+    clarification && clarification.draft.nonGoals.length > 0 ? clarification.draft.nonGoals.map(item => `- ${item}`).join("\n") : "- Not clarified.",
+    "",
     "## Constraints",
     "",
-    ...prd.constraints.map(item => `- ${item}`),
+    ...constraints.map(item => `- ${item}`),
     "",
     "## Acceptance Criteria",
     "",
-    ...prd.acceptanceCriteria.map(item => `- [ ] ${item}`),
+    ...acceptance.map(item => `- [ ] ${item}`),
     "",
+    clarification && clarification.draft.verification.length > 0 ? "## Verification" : undefined,
+    clarification && clarification.draft.verification.length > 0 ? "" : undefined,
+    clarification && clarification.draft.verification.length > 0 ? clarification.draft.verification.map(item => `- ${item}`).join("\n") : undefined,
+    clarification && clarification.draft.verification.length > 0 ? "" : undefined,
+    clarification && clarification.draft.risks.length > 0 ? "## Risks" : undefined,
+    clarification && clarification.draft.risks.length > 0 ? "" : undefined,
+    clarification && clarification.draft.risks.length > 0 ? clarification.draft.risks.map(item => `- ${item}`).join("\n") : undefined,
+    clarification && clarification.draft.risks.length > 0 ? "" : undefined,
     "## Open Questions",
     "",
-    ...prd.openQuestions.map(item => `- ${item}`),
+    ...openQuestions.map(item => `- ${item}`),
     "",
     clarification ? "## Clarification Loop" : undefined,
     clarification ? "" : undefined,
@@ -3965,7 +4060,7 @@ function formatPrd(task: TaskState, prd: ReturnType<typeof extractPrd>, clarific
     clarification ? "" : undefined,
     clarification ? formatClarificationAnswers(clarification) : undefined,
     clarification ? "" : undefined,
-  ].join("\n");
+  ].filter(line => line !== undefined).join("\n");
 }
 
 function extractPrd(prompt: string): {
@@ -3990,7 +4085,7 @@ function extractPrd(prompt: string): {
     .slice(0, 8);
 
   const inferredAcceptance = lines
-    .filter(line => /(完成|实现|支持|通过|works?|passes?|verify|test)/i.test(line))
+    .filter(line => /(完成|实现|支持|通过|\bworks?\b|\bpasses?\b|\bverify\b|\btest\b)/i.test(line))
     .map(line => stripListPrefix(line).replace(/^\[[ x]\]\s*/i, ""))
     .filter(line => line.length > 0)
     .slice(0, 8);
@@ -4026,6 +4121,8 @@ function createClarificationState(
     required?: boolean;
     maxQuestions?: number;
     seedDefaults?: boolean;
+    mode?: ClarificationMode;
+    requiredAxes?: ClarificationAxis[];
   } = {},
 ): ClarificationState {
   const maxQuestions = clampClarificationMax(options.maxQuestions);
@@ -4049,6 +4146,8 @@ function createClarificationState(
     enabled,
     required,
     status: enabled && questions.length > 0 ? "collecting" : "not_required",
+    mode: options.mode || "questions",
+    requiredAxes: dedupeClarificationAxes(options.requiredAxes || questions.map(question => question.axis)),
     updatedAt: now,
     generatedFrom,
     currentQuestionId: enabled && questions.length > 0 ? questions[0]?.id : undefined,
@@ -4057,9 +4156,12 @@ function createClarificationState(
     draft: {
       goal: prd.goal,
       scope: [],
+      users: [],
       nonGoals: [],
       constraints: prd.constraints.filter(item => item !== "Keep changes scoped to the requested workflow."),
       acceptanceCriteria: prd.acceptanceCriteria,
+      verification: [],
+      risks: [],
       openQuestions: meaningfulOpenQuestions,
     },
   };
@@ -4076,6 +4178,73 @@ function buildDefaultClarificationQuestions(maxQuestions: number, now: string): 
   }));
 }
 
+function buildPrdRefinementQuestions(state: ClarificationState, requiredAxes: ClarificationAxis[], now: string): ClarificationQuestion[] {
+  return requiredAxes.map((axis, index) => {
+    const existing = state.questions.find(question => question.axis === axis);
+    const id = `C${index + 1}`;
+    if (existing?.status === "answered" || existing?.status === "skipped") return { ...existing, id };
+    if (existing && isClarificationAxisResolved(state.draft, axis)) {
+      return {
+        id,
+        axis,
+        text: existing?.text || PRD_REFINEMENT_QUESTIONS[axis],
+        status: "answered" as const,
+        answer: summarizeClarifiedDraftAxis(state.draft, axis),
+        answeredAt: existing?.answeredAt || now,
+        rationale: existing?.rationale || "resolved from draft PRD",
+      };
+    }
+    return {
+      id,
+      axis,
+      text: existing?.text || PRD_REFINEMENT_QUESTIONS[axis],
+      status: "queued" as const,
+      askedAt: undefined,
+      answer: undefined,
+      answeredAt: undefined,
+      rationale: existing?.rationale,
+    };
+  });
+}
+
+function isClarificationAxisResolved(draft: ClarifiedPrdDraft, axis: ClarificationAxis): boolean {
+  if (axis === "goal") return !!draft.goal?.trim();
+  if (axis === "scope") return draft.scope.length > 0;
+  if (axis === "users") return draft.users.length > 0;
+  if (axis === "non_goals") return draft.nonGoals.length > 0;
+  if (axis === "constraints") return draft.constraints.length > 0;
+  if (axis === "risk") return draft.risks.length > 0;
+  if (axis === "verification") return draft.verification.length > 0 || draft.acceptanceCriteria.some(item => /^Verification:/i.test(item));
+  return draft.acceptanceCriteria.filter(item => !isDefaultAcceptanceCriterion(item)).length > 1;
+}
+
+function summarizeClarifiedDraftAxis(draft: ClarifiedPrdDraft, axis: ClarificationAxis): string {
+  if (axis === "goal") return draft.goal || "Goal recorded in draft PRD.";
+  if (axis === "scope") return draft.scope.join("; ");
+  if (axis === "users") return draft.users.join("; ");
+  if (axis === "non_goals") return draft.nonGoals.join("; ");
+  if (axis === "constraints") return draft.constraints.join("; ");
+  if (axis === "risk") return draft.risks.join("; ");
+  if (axis === "verification") return draft.verification.length > 0 ? draft.verification.join("; ") : draft.acceptanceCriteria.filter(item => /^Verification:/i.test(item)).join("; ");
+  return draft.acceptanceCriteria.filter(item => !isDefaultAcceptanceCriterion(item)).join("; ");
+}
+
+function isDefaultAcceptanceCriterion(item: string): boolean {
+  return item === "The requested behavior is implemented." ||
+    item === "Relevant project specs are respected." ||
+    item === "Targeted verification is run or clearly documented.";
+}
+
+function dedupeClarificationAxes(axes: ClarificationAxis[]): ClarificationAxis[] {
+  const seen = new Set<ClarificationAxis>();
+  const result: ClarificationAxis[] = [];
+  for (const axis of axes) {
+    if (seen.has(axis)) continue;
+    seen.add(axis);
+    result.push(axis);
+  }
+  return result;
+}
 async function persistClarificationUpdate(
   root: string,
   task: TaskState,
@@ -4108,11 +4277,14 @@ function normalizeClarificationState(parsed: Partial<ClarificationState>): Clari
     ? parsed.questions.map(normalizeClarificationQuestion).filter((question): question is ClarificationQuestion => !!question).slice(0, maxQuestions)
     : [];
   const status = isClarificationStatus(parsed.status) ? parsed.status : questions.length > 0 ? "collecting" : "not_required";
+  const requiredAxes = normalizeClarificationAxes(parsed.requiredAxes);
   const state: ClarificationState = {
     taskId: parsed.taskId,
     enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : status !== "not_required",
     required: typeof parsed.required === "boolean" ? parsed.required : status === "collecting",
     status,
+    mode: isClarificationMode(parsed.mode) ? parsed.mode : "questions",
+    requiredAxes: requiredAxes.length > 0 ? requiredAxes : dedupeClarificationAxes(questions.map(question => question.axis)),
     updatedAt: parsed.updatedAt,
     generatedFrom: typeof parsed.generatedFrom === "string" ? parsed.generatedFrom : undefined,
     currentQuestionId: typeof parsed.currentQuestionId === "string" ? parsed.currentQuestionId : undefined,
@@ -4146,9 +4318,12 @@ function normalizeClarificationDraft(value: unknown): ClarifiedPrdDraft {
   return {
     goal: typeof record.goal === "string" ? record.goal : undefined,
     scope: normalizeStringArray(record.scope),
+    users: normalizeStringArray(record.users),
     nonGoals: normalizeStringArray(record.nonGoals),
     constraints: normalizeStringArray(record.constraints),
     acceptanceCriteria: normalizeStringArray(record.acceptanceCriteria),
+    verification: normalizeStringArray(record.verification),
+    risks: normalizeStringArray(record.risks),
     openQuestions: normalizeStringArray(record.openQuestions),
   };
 }
@@ -4217,20 +4392,28 @@ function updateClarificationDraft(
   const next: ClarifiedPrdDraft = {
     goal: draft.goal,
     scope: [...draft.scope],
+    users: [...draft.users],
     nonGoals: [...draft.nonGoals],
     constraints: [...draft.constraints],
     acceptanceCriteria: [...draft.acceptanceCriteria],
+    verification: [...draft.verification],
+    risks: [...draft.risks],
     openQuestions: [...draft.openQuestions],
   };
 
   if (!answer.trim()) return next;
 
   if (question.axis === "goal") next.goal = answer;
-  if (question.axis === "scope" || question.axis === "users") next.scope = dedupeStrings([...next.scope, answer]);
+  if (question.axis === "scope") next.scope = dedupeStrings([...next.scope, answer]);
+  if (question.axis === "users") next.users = dedupeStrings([...next.users, answer]);
   if (question.axis === "non_goals") next.nonGoals = dedupeStrings([...next.nonGoals, answer]);
-  if (question.axis === "constraints" || question.axis === "risk") next.constraints = dedupeStrings([...next.constraints, answer]);
-  if (question.axis === "acceptance") next.acceptanceCriteria = dedupeStrings([...next.acceptanceCriteria, answer]);
-  if (question.axis === "verification") next.acceptanceCriteria = dedupeStrings([...next.acceptanceCriteria, `Verification: ${answer}`]);
+  if (question.axis === "constraints") next.constraints = dedupeStrings([...next.constraints, answer]);
+  if (question.axis === "risk") next.risks = dedupeStrings([...next.risks, answer]);
+  if (question.axis === "acceptance") next.acceptanceCriteria = dedupeStrings([...next.acceptanceCriteria.filter(item => !isDefaultAcceptanceCriterion(item)), answer]);
+  if (question.axis === "verification") {
+    next.verification = dedupeStrings([...next.verification, answer]);
+    next.acceptanceCriteria = dedupeStrings([...next.acceptanceCriteria, `Verification: ${answer}`]);
+  }
   return next;
 }
 
@@ -4250,6 +4433,18 @@ export function formatClarificationPrompt(task: TaskState, state: ClarificationS
   if (!question) {
     return `Clarification for ${task.id} is ${state.status}.`;
   }
+  if (state.mode === "refine") {
+    return [
+      `Continue Project Flow PRD refinement for ${task.id}.`,
+      "Ask exactly one focused PRD question and wait for the user's answer. Do not plan or implement yet.",
+      `Required axes: ${state.requiredAxes.join(", ") || "none"}`,
+      "",
+      `Question ${question.id} (${question.axis}): ${question.text}`,
+      "",
+      "Draft so far:",
+      formatClarifiedPrdDraft(state.draft),
+    ].join("\n");
+  }
   return [
     `Continue Project Flow clarification for ${task.id}.`,
     "Ask exactly one question and wait for the user's answer. Do not plan or implement yet.",
@@ -4262,8 +4457,10 @@ export function formatClarificationSummary(state: ClarificationState, max = 8): 
   const current = getCurrentClarificationQuestion(state);
   const lines = [
     `status: ${state.status}`,
+    `mode: ${state.mode}`,
     `updated: ${state.updatedAt}`,
     `required: ${state.required ? "yes" : "no"}`,
+    state.mode === "refine" ? `required axes: ${state.requiredAxes.join(", ") || "none"}` : undefined,
     `questions: ${state.questions.filter(question => question.status === "answered").length} answered, ${state.questions.filter(question => question.status === "skipped").length} skipped, ${openClarificationQuestions(state).length} open`,
     current ? `current: ${current.id} - ${current.text}` : undefined,
   ].filter((line): line is string => !!line);
@@ -4281,7 +4478,9 @@ function formatClarificationMarkdown(task: TaskState, state: ClarificationState)
     `Task: ${task.id}`,
     `Title: ${task.title}`,
     `Status: ${state.status}`,
+    `Mode: ${state.mode}`,
     `Required: ${state.required ? "yes" : "no"}`,
+    state.mode === "refine" ? `Required axes: ${state.requiredAxes.join(", ") || "none"}` : undefined,
     `Updated: ${state.updatedAt}`,
     state.generatedFrom ? `Reason: ${state.generatedFrom}` : undefined,
     "",
@@ -4318,9 +4517,12 @@ function formatClarifiedPrdDraft(draft: ClarifiedPrdDraft): string {
   return [
     `- Goal: ${draft.goal || "Not clarified."}`,
     draft.scope.length > 0 ? `- Scope: ${draft.scope.join("; ")}` : "- Scope: not clarified.",
+    draft.users.length > 0 ? `- Users: ${draft.users.join("; ")}` : "- Users: not clarified.",
     draft.nonGoals.length > 0 ? `- Non-goals: ${draft.nonGoals.join("; ")}` : "- Non-goals: not clarified.",
     draft.constraints.length > 0 ? `- Constraints: ${draft.constraints.join("; ")}` : "- Constraints: not clarified.",
     draft.acceptanceCriteria.length > 0 ? `- Acceptance: ${draft.acceptanceCriteria.join("; ")}` : "- Acceptance: not clarified.",
+    draft.verification.length > 0 ? `- Verification: ${draft.verification.join("; ")}` : "- Verification: not clarified.",
+    draft.risks.length > 0 ? `- Risks: ${draft.risks.join("; ")}` : "- Risks: not clarified.",
     draft.openQuestions.length > 0 ? `- Open questions: ${draft.openQuestions.join("; ")}` : "- Open questions: none.",
   ].join("\n");
 }
@@ -4340,16 +4542,20 @@ function formatClarificationContext(state: ClarificationState, max = 1400): stri
   const current = getCurrentClarificationQuestion(state);
   const lines = [
     `- status: ${state.status}`,
+    `- mode: ${state.mode}`,
     `- required: ${state.required ? "yes" : "no"}`,
+    state.mode === "refine" ? `- required axes: ${state.requiredAxes.join(", ") || "none"}` : undefined,
     `- open questions: ${openClarificationQuestions(state).length}`,
     current ? `- current question: ${current.id} - ${current.text}` : "- current question: none",
-    state.status === "collecting" && current
-      ? "- guidance: ask exactly this one clarification question and wait; do not plan or implement yet."
-      : "- guidance: proceed with the normal project workflow.",
+    state.status === "collecting" && current && state.mode === "refine"
+      ? "- guidance: ask exactly this PRD refinement question and wait; do not plan or implement until required axes are answered or skipped."
+      : state.status === "collecting" && current
+        ? "- guidance: ask exactly this one clarification question and wait; do not plan or implement yet."
+        : "- guidance: proceed with the normal project workflow.",
     state.questions.some(question => question.status === "answered")
       ? `- recent answers: ${state.questions.filter(question => question.status === "answered").slice(-3).map(question => `${question.id} ${summarizeUnknown(question.answer || "", 120)}`).join("; ")}`
       : "- recent answers: none",
-  ];
+  ].filter((line): line is string => !!line);
   const content = lines.join("\n");
   return content.length <= max ? content : `${content.slice(0, max)}\n[Clarification context truncated by Project Flow]`;
 }
@@ -4361,6 +4567,7 @@ function isMeaningfulOpenQuestion(question: string): boolean {
 
 function isInternalClarificationPrompt(prompt: string): boolean {
   return /^Continue Project Flow clarification for\b/i.test(prompt) ||
+    /^Continue Project Flow PRD refinement for\b/i.test(prompt) ||
     /^Clarification for\s+T-\d{8}-/i.test(prompt);
 }
 
@@ -4388,6 +4595,10 @@ function isClarificationStatus(value: unknown): value is ClarificationStatus {
   return value === "not_required" || value === "collecting" || value === "ready" || value === "skipped";
 }
 
+function isClarificationMode(value: unknown): value is ClarificationMode {
+  return value === "questions" || value === "refine";
+}
+
 function isClarificationQuestionStatus(value: unknown): value is ClarificationQuestionStatus {
   return value === "queued" || value === "asking" || value === "answered" || value === "skipped";
 }
@@ -4401,6 +4612,10 @@ function isClarificationAxis(value: unknown): value is ClarificationAxis {
     value === "non_goals" ||
     value === "verification" ||
     value === "risk";
+}
+
+function normalizeClarificationAxes(value: unknown): ClarificationAxis[] {
+  return Array.isArray(value) ? dedupeClarificationAxes(value.filter(isClarificationAxis)) : [];
 }
 
 function createResearchState(

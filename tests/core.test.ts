@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { ClarificationAxis } from "../src/core";
 import {
   buildContextBundle,
   addTaskResearchNote,
@@ -54,6 +55,7 @@ import {
   setActiveTask,
   skipTaskClarification,
   startTaskClarification,
+  startPrdRefinement,
   advancePlan,
   updateAcceptanceItem,
   updateRoleOrchestrationStatus,
@@ -485,6 +487,40 @@ describe("project flow core", () => {
       expect(forced.status).toBe("updated");
       expect(forced.state?.status).toBe("skipped");
       expect(forced.state?.questions[1]?.status).toBe("skipped");
+    });
+  });
+
+  test("runs PRD refinement through required axes and updates draft PRD", async () => {
+    await withTempProject(async root => {
+      const paths = await ensureProject(root);
+      const task = await createTask(root, "onboarding workflow request");
+      const axes: ClarificationAxis[] = ["scope", "users", "acceptance", "verification"];
+
+      const started = await startPrdRefinement(root, task.id, { requiredAxes: axes });
+      expect(started?.mode).toBe("refine");
+      expect(started?.status).toBe("collecting");
+      expect(started?.requiredAxes).toEqual(axes);
+      expect(started?.currentQuestionId).toBe("C1");
+      expect(started?.questions[0]?.axis).toBe("scope");
+
+      await answerTaskClarification(root, task.id, "Only the PRD artifact and command surface are in scope.");
+      await answerTaskClarification(root, task.id, "Maintainers refining Project Flow tasks before implementation.");
+      await answerTaskClarification(root, task.id, "The PRD records refined scope, users, and acceptance.");
+      const finished = await answerTaskClarification(root, task.id, "Run bun run check and the focused clarification tests.");
+
+      expect(finished.state?.status).toBe("ready");
+      expect(finished.state?.draft.scope).toContain("Only the PRD artifact and command surface are in scope.");
+      expect(finished.state?.draft.users).toContain("Maintainers refining Project Flow tasks before implementation.");
+      expect(finished.state?.draft.acceptanceCriteria).toContain("The PRD records refined scope, users, and acceptance.");
+      expect(finished.state?.draft.verification).toContain("Run bun run check and the focused clarification tests.");
+
+      const prd = await readFile(path.join(paths.tasksDir, task.id, "prd.md"), "utf8");
+      expect(prd).toContain("## Scope");
+      expect(prd).toContain("Only the PRD artifact and command surface are in scope.");
+      expect(prd).toContain("## Users");
+      expect(prd).toContain("Maintainers refining Project Flow tasks before implementation.");
+      expect(prd).toContain("## Verification");
+      expect(prd).toContain("Run bun run check and the focused clarification tests.");
     });
   });
 

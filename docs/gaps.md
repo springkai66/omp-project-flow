@@ -31,9 +31,9 @@ It also records implemented areas that are useful but still below the depth of T
   - Boundary: session-aware commands and hooks use the current session scope; project-level active task lookup is retained for legacy/no-session contexts and explicit fallback callers.
 
 - Interactive brainstorm PRD loop
-  - Status: partial.
-  - Current behavior: Project Flow extracts an initial PRD and supports clarification questions, but it does not yet run a richer brainstorm loop until the PRD is explicitly complete.
-  - Target behavior: add a PRD refinement mode that asks focused questions, updates draft scope and acceptance criteria, and only exits when required axes are resolved or explicitly skipped.
+  - Status: implemented in 0.21.0.
+  - Current behavior: Project Flow supports `/prd:refine` and `/task:clarify --refine`, which run a focused one-question-at-a-time PRD refinement loop over required axes: goal, scope, users, acceptance, constraints, non-goals, verification, and risk. Answers update `clarification.json`, `clarification.md`, `prd.md`, hidden context, handoff, snapshots, and readiness.
+  - Boundary: refinement stays explicit and reviewable; Project Flow asks and records focused questions, but it does not invent unresolved product decisions or proceed past collecting mode until required axes are answered or skipped.
 
 - Deeper subtask tree planning
   - Status: partial.

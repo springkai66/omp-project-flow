@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.0
+
+- Added focused PRD refinement mode with required axes for goal, scope, users, acceptance, constraints, non-goals, verification, and risk.
+- Added `/prd:refine` and `/task:clarify --refine` to run the one-question-at-a-time refinement loop before planning or implementation.
+- Refined answers now update the task PRD draft, clarification summaries, hidden context, and readiness gating.
+
 ## 0.20.0
 
 - Added session-scoped active task pointers in `.project-flow/workflow/active-task-scopes.json` while preserving the legacy project pointer.
