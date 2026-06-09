@@ -213,9 +213,12 @@ Role orchestration handoff 会写入每个任务的 `roles/` 目录。`/task:rol
       verification-remediation.md
   workflow/
     active-task.json
+    active-task-scopes.json
 ```
 
 任务 metadata 存在每个 `task.json` 的 `metadata` 字段中。它只记录稳定、非派生信息，例如 `kind`、`source`、`priority`、`risk`、`labels`、`origin` 和任务关系。readiness、验证数量、触碰文件等派生状态仍由 snapshot/resume/readiness artifacts 生成。
+
+当 OMP 暴露 session id 时，active task 指针会按 session 隔离。Project Flow 将这些指针保存在 `.project-flow/workflow/active-task-scopes.json`，并保留 `.project-flow/workflow/active-task.json` 作为 legacy 或无 session 场景的项目级兼容指针。Commands、lifecycle hooks、tool events、turn journal 和 status 更新都会从当前 session scope 解析 active task。
 
 Subtask 是通过 `metadata.relationships.parentTaskId` 和 `childTaskIds` 关联的普通任务。Project Flow 会为复杂 root task 在 `subtasks/plan.json` 和 `subtasks/plan.md` 下生成受控子任务计划；每个计划都会记录确定性的 complexity scoring，以及当前 `off`、`suggest` 或 `auto` 策略。使用 `/task:subtasks` 查看建议，`/task:subtasks --refresh` 重新生成，`/task:subtasks --mode auto --refresh` 重新生成并立即创建 child tasks，`/task:subtasks --apply` 从现有建议创建已关联 child tasks。也可以用 `/task:child <prompt>` 手动创建子任务，用 `/task:tree` 查看任务树。当子任务尚未完成时，父任务 readiness 会阻止收尾；仍可用 `/task:finish --force` 覆盖。
 
@@ -251,6 +254,12 @@ bun test
 MIT。见 [LICENSE](./LICENSE)。
 
 ## 版本记录
+
+### 0.20.0
+
+- 新增 `.project-flow/workflow/active-task-scopes.json`，用于 session-scoped active task 指针。
+- Commands、lifecycle hooks、tool events、turn journals 和 status 现在使用当前 OMP session scope。
+- 保留 `.project-flow/workflow/active-task.json` 作为项目级兼容指针。
 
 ### 0.19.0
 

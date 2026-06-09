@@ -4,6 +4,22 @@ import crypto from "node:crypto";
 
 export type TaskStatus = "active" | "paused" | "finished";
 export type TaskPhase = "intake" | "planning" | "implementing" | "verifying" | "finished";
+export type ActiveTaskScopeKind = "project" | "session";
+
+export interface ActiveTaskScope {
+  kind: ActiveTaskScopeKind;
+  id?: string;
+}
+
+export interface ActiveTaskScopeRecord {
+  taskId: string;
+  updatedAt: string;
+}
+
+export interface ActiveTaskScopesState {
+  updatedAt: string;
+  scopes: Record<string, ActiveTaskScopeRecord>;
+}
 
 export interface ProjectPaths {
   root: string;
@@ -16,6 +32,7 @@ export interface ProjectPaths {
   workflowDir: string;
   journalsDir: string;
   activeTaskPath: string;
+  activeTaskScopesPath: string;
 }
 
 export interface Checkpoint {
@@ -576,6 +593,7 @@ export interface CreateTaskOptions {
   custom?: Record<string, unknown>;
   activate?: boolean;
   subtaskMode?: AutoSubtaskMode;
+  activeScope?: ActiveTaskScope;
 }
 
 export const DEFAULT_AUTO_SUBTASK_MODE: AutoSubtaskMode = "suggest";
@@ -827,6 +845,7 @@ export function getProjectPaths(root: string): ProjectPaths {
     workflowDir,
     journalsDir: path.join(workspaceDir, "journals"),
     activeTaskPath: path.join(workflowDir, "active-task.json"),
+    activeTaskScopesPath: path.join(workflowDir, "active-task-scopes.json"),
   };
 }
 
@@ -936,16 +955,102 @@ export function taskIdFromPrompt(prompt: string, now = new Date()): string {
   return `T-${date}-${safeSlug(prompt)}`;
 }
 
-export async function loadActiveTask(root: string): Promise<TaskState | undefined> {
-  const paths = getProjectPaths(root);
-  if (!(await pathExists(paths.activeTaskPath))) return undefined;
-  try {
-    const active = JSON.parse(await readFile(paths.activeTaskPath, "utf8")) as { id?: string };
-    if (!active.id) return undefined;
-    return await loadTask(root, active.id);
-  } catch {
-    return undefined;
+export async function loadActiveTask(root: string, scope?: ActiveTaskScope, options: { fallbackToProject?: boolean } = {}): Promise<TaskState | undefined> {
+  const scoped = normalizeActiveTaskScope(scope);
+  if (scoped.kind === "session") {
+    const scopedTask = await loadScopedActiveTask(root, scoped);
+    if (scopedTask) return scopedTask;
+    return options.fallbackToProject ? loadProjectActiveTask(root) : undefined;
   }
+  return loadProjectActiveTask(root);
+}
+
+async function loadProjectActiveTask(root: string): Promise<TaskState | undefined> {
+  const paths = getProjectPaths(root);
+  if (await pathExists(paths.activeTaskPath)) {
+    try {
+      const active = JSON.parse(await readFile(paths.activeTaskPath, "utf8")) as { id?: string };
+      if (active.id) {
+        const task = await loadTask(root, active.id);
+        if (task?.status === "active") return task;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  const scopes = await readActiveTaskScopes(root);
+  const project = scopes.scopes.project;
+  if (!project?.taskId) return undefined;
+  const task = await loadTask(root, project.taskId);
+  return task?.status === "active" ? task : undefined;
+}
+
+async function loadScopedActiveTask(root: string, scope: ActiveTaskScope): Promise<TaskState | undefined> {
+  const key = activeTaskScopeKey(scope);
+  if (key === "project") return loadProjectActiveTask(root);
+  const state = await readActiveTaskScopes(root);
+  const record = state.scopes[key];
+  if (!record?.taskId) return undefined;
+  const task = await loadTask(root, record.taskId);
+  return task?.status === "active" ? task : undefined;
+}
+
+export async function readActiveTaskScopes(root: string): Promise<ActiveTaskScopesState> {
+  const paths = getProjectPaths(root);
+  const fallback = { updatedAt: new Date().toISOString(), scopes: {} };
+  if (!(await pathExists(paths.activeTaskScopesPath))) return fallback;
+  try {
+    const parsed = JSON.parse(await readFile(paths.activeTaskScopesPath, "utf8")) as Partial<ActiveTaskScopesState>;
+    const scopes: Record<string, ActiveTaskScopeRecord> = {};
+    if (parsed.scopes && typeof parsed.scopes === "object") {
+      for (const [key, value] of Object.entries(parsed.scopes)) {
+        if (!value || typeof value !== "object") continue;
+        const record = value as Partial<ActiveTaskScopeRecord>;
+        if (typeof record.taskId === "string" && typeof record.updatedAt === "string") {
+          scopes[key] = { taskId: record.taskId, updatedAt: record.updatedAt };
+        }
+      }
+    }
+    return { updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : fallback.updatedAt, scopes };
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeActiveTaskPointer(root: string, taskId: string, updatedAt: string, scope?: ActiveTaskScope): Promise<void> {
+  const paths = await ensureProject(root);
+  const scoped = normalizeActiveTaskScope(scope);
+  const state = await readActiveTaskScopes(root);
+  state.updatedAt = updatedAt;
+  state.scopes[activeTaskScopeKey(scoped)] = { taskId, updatedAt };
+  state.scopes.project = { taskId, updatedAt };
+  await writeFile(paths.activeTaskScopesPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(paths.activeTaskPath, `${JSON.stringify({ id: taskId, updatedAt }, null, 2)}\n`, "utf8");
+}
+
+async function clearActiveTaskPointer(root: string, scope?: ActiveTaskScope, taskId?: string): Promise<void> {
+  const paths = getProjectPaths(root);
+  const scoped = normalizeActiveTaskScope(scope);
+  const state = await readActiveTaskScopes(root);
+  const key = activeTaskScopeKey(scoped);
+  if (!taskId || state.scopes[key]?.taskId === taskId) delete state.scopes[key];
+  if (!taskId || state.scopes.project?.taskId === taskId) {
+    delete state.scopes.project;
+    await rm(paths.activeTaskPath, { force: true });
+  }
+  state.updatedAt = new Date().toISOString();
+  await mkdir(paths.workflowDir, { recursive: true });
+  await writeFile(paths.activeTaskScopesPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function normalizeActiveTaskScope(scope?: ActiveTaskScope): ActiveTaskScope {
+  if (scope?.kind === "session" && scope.id?.trim()) return { kind: "session", id: scope.id.trim() };
+  return { kind: "project" };
+}
+
+function activeTaskScopeKey(scope?: ActiveTaskScope): string {
+  const normalized = normalizeActiveTaskScope(scope);
+  return normalized.kind === "session" ? `session:${normalized.id || "project"}` : "project";
 }
 
 export async function loadTask(root: string, taskId: string): Promise<TaskState | undefined> {
@@ -1156,11 +1261,10 @@ export async function resolveTask(root: string, query: string): Promise<TaskReso
   return { status: "missing", matches: [] };
 }
 
-export async function setActiveTask(root: string, taskId: string): Promise<TaskState | undefined> {
-  const paths = await ensureProject(root);
+export async function setActiveTask(root: string, taskId: string, scope?: ActiveTaskScope): Promise<TaskState | undefined> {
   const task = await loadTask(root, taskId);
   if (!task) return undefined;
-  const previous = await loadActiveTask(root);
+  const previous = await loadActiveTask(root, scope);
   if (previous && previous.id !== task.id && previous.status === "active") {
     previous.status = "paused";
     await saveTask(root, previous);
@@ -1174,8 +1278,8 @@ export async function setActiveTask(root: string, taskId: string): Promise<TaskS
   task.status = "active";
   task.updatedAt = new Date().toISOString();
   await saveTask(root, task);
-  await writeFile(paths.activeTaskPath, `${JSON.stringify({ id: task.id, updatedAt: task.updatedAt }, null, 2)}\n`, "utf8");
-  await appendTaskEvent(root, task.id, { type: "task_activated", timestamp: task.updatedAt, data: { taskId: task.id } });
+  await writeActiveTaskPointer(root, task.id, task.updatedAt, scope);
+  await appendTaskEvent(root, task.id, { type: "task_activated", timestamp: task.updatedAt, data: { taskId: task.id, scope: activeTaskScopeKey(scope) } });
   await writeTaskHandoff(root, task, "activated");
   return task;
 }
@@ -1896,14 +2000,14 @@ export function formatUpstreamTaskPrompt(report: UpstreamSyncReport, note?: stri
 export async function createTask(root: string, prompt: string, options: CreateTaskOptions = {}): Promise<TaskState> {
   const paths = await ensureProject(root);
   const activate = options.activate !== false;
-  const previous = activate ? await loadActiveTask(root) : undefined;
+  const previous = activate ? await loadActiveTask(root, options.activeScope) : undefined;
   if (previous && previous.status === "active") {
     previous.status = "paused";
     await saveTask(root, previous);
     await appendTaskEvent(root, previous.id, {
       type: "task_paused",
       timestamp: previous.updatedAt,
-      data: { reason: "created_new_task" },
+      data: { reason: "created_new_task", nextScope: activeTaskScopeKey(options.activeScope) },
     });
   }
   let id = taskIdFromPrompt(prompt);
@@ -1951,22 +2055,22 @@ export async function createTask(root: string, prompt: string, options: CreateTa
     }
   }
   if (activate) {
-    await writeFile(paths.activeTaskPath, `${JSON.stringify({ id, updatedAt: now }, null, 2)}\n`, "utf8");
+    await writeActiveTaskPointer(root, id, now, options.activeScope);
   }
-  await appendTaskEvent(root, id, { type: "task_created", timestamp: now, data: { prompt } });
+  await appendTaskEvent(root, id, { type: "task_created", timestamp: now, data: { prompt, scope: activeTaskScopeKey(options.activeScope) } });
   await writeRoleOrchestration(root, task, "created");
   await writeTaskHandoff(root, task, "created");
   return task;
 }
 
 export async function getOrCreateActiveTask(root: string, prompt: string, options: CreateTaskOptions = {}): Promise<TaskState> {
-  const active = await loadActiveTask(root);
+  const active = await loadActiveTask(root, options.activeScope);
   if (active && active.status === "active") {
     const now = new Date().toISOString();
     active.lastPrompt = prompt;
     active.counters.turns += 1;
     await saveTask(root, active);
-    await appendTaskEvent(root, active.id, { type: "user_prompt", timestamp: now, data: { prompt } });
+    await appendTaskEvent(root, active.id, { type: "user_prompt", timestamp: now, data: { prompt, scope: activeTaskScopeKey(options.activeScope) } });
     await writeTaskHandoff(root, active, "user_prompt");
     return active;
   }
@@ -2885,9 +2989,8 @@ function isTaskRoleStatus(value: unknown): value is TaskRoleStatus {
   return value === "pending" || value === "in_progress" || value === "done" || value === "blocked";
 }
 
-export async function finishActiveTask(root: string, note?: string, options: { force?: boolean } = {}): Promise<TaskState | undefined> {
-  const paths = getProjectPaths(root);
-  const task = await loadActiveTask(root);
+export async function finishActiveTask(root: string, note?: string, options: { force?: boolean; activeScope?: ActiveTaskScope } = {}): Promise<TaskState | undefined> {
+  const task = await loadActiveTask(root, options.activeScope);
   if (!task) return undefined;
   const readiness = await writeTaskReadiness(root, task, "finish_check");
   if (readiness.status === "blocked" && !options.force) {
@@ -2924,19 +3027,18 @@ export async function finishActiveTask(root: string, note?: string, options: { f
     await writeTaskInfo(root, parent, "child_finished", { refreshSubtasks: true });
     await writeTaskHandoff(root, parent, "child_finished");
   }
-  await rm(paths.activeTaskPath, { force: true });
+  await clearActiveTaskPointer(root, options.activeScope, task.id);
   return task;
 }
 
-export async function pauseActiveTask(root: string, note?: string): Promise<TaskState | undefined> {
-  const paths = getProjectPaths(root);
-  const task = await loadActiveTask(root);
+export async function pauseActiveTask(root: string, note?: string, scope?: ActiveTaskScope): Promise<TaskState | undefined> {
+  const task = await loadActiveTask(root, scope);
   if (!task) return undefined;
   task.status = "paused";
   await saveTask(root, task);
   await appendTaskEvent(root, task.id, { type: "task_paused", timestamp: new Date().toISOString(), data: { note } });
   await writeTaskHandoff(root, task, "pause");
-  await rm(paths.activeTaskPath, { force: true });
+  await clearActiveTaskPointer(root, scope, task.id);
   return task;
 }
 
@@ -2944,8 +3046,9 @@ export async function recordToolEvent(
   root: string,
   kind: "tool_start" | "tool_end",
   data: { toolName: string; toolCallId?: string; args?: unknown; isError?: boolean; resultSummary?: string },
+  scope?: ActiveTaskScope,
 ): Promise<void> {
-  let task = await loadActiveTask(root);
+  let task = await loadActiveTask(root, scope);
   if (!task || task.status !== "active") {
     if (kind !== "tool_end" || !shouldInferTaskFromTool(data)) return;
     task = await createTask(root, inferTaskPromptFromTool(data), {
@@ -2958,11 +3061,12 @@ export async function recordToolEvent(
         toolCallId: data.toolCallId,
       },
       subtaskMode: await readProjectAutoSubtaskMode(root),
+      activeScope: scope,
     });
     await appendTaskEvent(root, task.id, {
       type: "task_inferred",
       timestamp: new Date().toISOString(),
-      data: { reason: "tool_activity", toolName: data.toolName, toolCallId: data.toolCallId },
+      data: { reason: "tool_activity", toolName: data.toolName, toolCallId: data.toolCallId, scope: activeTaskScopeKey(scope) },
     });
   }
   if (kind === "tool_end") {
@@ -3540,8 +3644,8 @@ export async function writeTaskHandoff(root: string, task: TaskState, reason = "
   return content;
 }
 
-export async function writeTurnJournal(root: string, reason = "turn"): Promise<void> {
-  const task = await loadActiveTask(root);
+export async function writeTurnJournal(root: string, reason = "turn", scope?: ActiveTaskScope): Promise<void> {
+  const task = await loadActiveTask(root, scope);
   if (!task) return;
   await writeJournal(root, task, reason);
   await writeTaskHandoff(root, task, reason);

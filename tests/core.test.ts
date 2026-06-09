@@ -26,6 +26,7 @@ import {
   readPlan,
   readAcceptance,
   refreshSubtaskPlanArtifacts,
+  readActiveTaskScopes,
   readRoleOrchestration,
   readVerificationRemediationPlan,
   readSubtaskPlan,
@@ -163,6 +164,26 @@ describe("project flow core", () => {
 
       const activeAfterSwitch = await loadActiveTask(root);
       expect(activeAfterSwitch?.id).toBe(first.id);
+    });
+  });
+
+  test("tracks active tasks per session scope with project fallback", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const sessionA = { kind: "session", id: "window-a" } as const;
+      const sessionB = { kind: "session", id: "window-b" } as const;
+      const first = await createTask(root, "implement window A task", { activeScope: sessionA });
+      const second = await createTask(root, "implement window B task", { activeScope: sessionB });
+
+      expect((await loadActiveTask(root, sessionA))?.id).toBe(first.id);
+      expect((await loadActiveTask(root, sessionB))?.id).toBe(second.id);
+      expect((await loadActiveTask(root))?.id).toBe(second.id);
+      const missingSession = { kind: "session", id: "window-c" } as const;
+      expect(await loadActiveTask(root, missingSession)).toBeUndefined();
+      expect((await loadActiveTask(root, missingSession, { fallbackToProject: true }))?.id).toBe(second.id);
+      const scopes = await readActiveTaskScopes(root);
+      expect(scopes.scopes["session:window-a"]?.taskId).toBe(first.id);
+      expect(scopes.scopes["session:window-b"]?.taskId).toBe(second.id);
     });
   });
 

@@ -26,9 +26,9 @@ It also records implemented areas that are useful but still below the depth of T
 ## Medium Priority
 
 - Session-scoped active task
-  - Status: missing.
-  - Current behavior: each project has one active task in `.project-flow/workflow/active-task.json`.
-  - Target behavior: allow different OMP windows or sessions to point at different active tasks, with project-level active task as a fallback.
+  - Status: implemented in 0.20.0.
+  - Current behavior: `.project-flow/workflow/active-task-scopes.json` tracks per-session active task pointers keyed by OMP session identity, while `.project-flow/workflow/active-task.json` remains the project-level compatibility pointer.
+  - Boundary: session-aware commands and hooks use the current session scope; project-level active task lookup is retained for legacy/no-session contexts and explicit fallback callers.
 
 - Interactive brainstorm PRD loop
   - Status: partial.

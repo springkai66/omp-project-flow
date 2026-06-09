@@ -213,9 +213,12 @@ The upstream commands are for controlled upgrades when ECC or OMO changes. They 
       verification-remediation.md
   workflow/
     active-task.json
+    active-task-scopes.json
 ```
 
 Task metadata is stored inside each `task.json` under `metadata`. It records stable, non-derived fields such as `kind`, `source`, `priority`, `risk`, `labels`, `origin`, and task relationships. Derived state such as readiness, verification counts, and touched files remains in snapshot/resume/readiness artifacts.
+
+Active task pointers are session-scoped when OMP exposes a session id. Project Flow stores those pointers in `.project-flow/workflow/active-task-scopes.json` and keeps `.project-flow/workflow/active-task.json` as the project-level compatibility pointer for legacy or no-session contexts. Commands, lifecycle hooks, tool events, turn journals, and status updates resolve the active task from the current session scope.
 
 Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId` and `childTaskIds`. Project Flow creates a guarded subtask plan for complex root tasks under `subtasks/plan.json` and `subtasks/plan.md`; each plan records deterministic complexity scoring plus the active `off`, `suggest`, or `auto` policy. Use `/task:subtasks` to inspect suggestions, `/task:subtasks --refresh` to regenerate them, `/task:subtasks --mode auto --refresh` to regenerate and immediately create child tasks, and `/task:subtasks --apply` to create linked child tasks from existing suggestions. Use `/task:child <prompt>` to create a child manually and `/task:tree` to inspect the tree. Parent task readiness is blocked while child tasks remain unfinished, unless `/task:finish --force` is used.
 
@@ -251,6 +254,12 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.20.0
+
+- Added session-scoped active task pointers in `.project-flow/workflow/active-task-scopes.json`.
+- Commands, lifecycle hooks, tool events, turn journals, and status now use the current OMP session scope.
+- Kept `.project-flow/workflow/active-task.json` as the project-level compatibility pointer.
 
 ### 0.19.0
 

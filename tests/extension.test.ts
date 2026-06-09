@@ -26,7 +26,7 @@ function createFakePi() {
     appendEntry: () => undefined,
   } as any;
 
-  const ctx = (cwd: string) => ({
+  const ctx = (cwd: string, extra: Record<string, unknown> = {}) => ({
     cwd,
     hasUI: true,
     ui: {
@@ -36,6 +36,7 @@ function createFakePi() {
     sessionManager: {
       getEntries: () => [],
     },
+    ...extra,
   });
 
   return { pi, commands, handlers, status, notifications, sentMessages, ctx };
@@ -119,6 +120,20 @@ describe("project flow extension", () => {
       expect(result?.message?.customType).toBe("project-flow");
       expect(result?.message?.display).toBe(false);
       expect(result?.message?.content).toContain("[PROJECT FLOW ACTIVE]");
+    });
+  });
+
+  test("tracks active task per detected session scope", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+      const beforeAgentStart = fake.handlers.get("before_agent_start")?.[0];
+
+      await beforeAgentStart?.({ type: "before_agent_start", prompt: "implement session A feature", systemPrompt: [] }, fake.ctx(root, { sessionManager: { getSessionId: () => "session-a" } }));
+      await beforeAgentStart?.({ type: "before_agent_start", prompt: "implement session B feature", systemPrompt: [] }, fake.ctx(root, { sessionManager: { getSessionId: () => "session-b" } }));
+
+      expect((await loadActiveTask(root, { kind: "session", id: "session-a" }))?.title).toBe("implement session A feature");
+      expect((await loadActiveTask(root, { kind: "session", id: "session-b" }))?.title).toBe("implement session B feature");
     });
   });
 

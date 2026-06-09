@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.0
+
+- Added session-scoped active task pointers in `.project-flow/workflow/active-task-scopes.json` while preserving the legacy project pointer.
+- Commands, lifecycle hooks, tool events, turn journals, and status updates now resolve the active task from the current OMP session.
+- Added coverage for independent session active tasks and session-detected task creation.
+
 ## 0.19.0
 
 - Added opt-in verification remediation loop artifacts with failed checks, next actions, stop conditions, and bounded attempts.

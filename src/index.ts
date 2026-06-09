@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { AutoSubtaskMode, ClarificationState, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
+import type { ActiveTaskScope, AutoSubtaskMode, ClarificationState, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
@@ -135,7 +135,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const prompt = args.trim() || "Manual project task";
-      const task = await createTask(root, prompt, { subtaskMode: await readProjectAutoSubtaskMode(root) });
+      const task = await createTask(root, prompt, { subtaskMode: await readProjectAutoSubtaskMode(root), activeScope: activeTaskScopeFromContext(ctx) });
       ctx.ui.notify(`Created task ${task.id}`, "info");
     },
   });
@@ -144,7 +144,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Ask the agent to continue the active Project Flow task",
     handler: async (_args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await loadActiveTask(root);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No active Project Flow task. Use /task:new or ask for code work.", "warning");
         return;
@@ -164,7 +164,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Resume a Project Flow task from its latest resume pack",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -210,7 +210,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show the active Project Flow task status",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -228,7 +228,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show whether a Project Flow task is ready to finish",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -242,7 +242,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Refresh and show a Project Flow task snapshot",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -297,7 +297,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         ctx.ui.notify(`No Project Flow task matched "${query}".`, "warning");
         return;
       }
-      const task = await setActiveTask(root, result.task.id);
+      const task = await setActiveTask(root, result.task.id, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify(`Could not activate task ${result.task.id}.`, "warning");
         return;
@@ -311,10 +311,11 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Finish the active Project Flow task and write a journal entry",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const active = await loadActiveTask(root);
+      const activeScope = activeTaskScopeFromContext(ctx);
+      const active = await loadActiveTask(root, activeScope);
       const verification = active ? await readVerification(root, active.id) : undefined;
       const parsed = parseFinishArgs(args);
-      const task = await finishActiveTask(root, parsed.note, { force: parsed.force });
+      const task = await finishActiveTask(root, parsed.note, { force: parsed.force, activeScope });
       if (!task) {
         if (!active) {
           ctx.ui.notify("No active Project Flow task to finish.", "warning");
@@ -342,7 +343,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Pause the active Project Flow task without archiving it",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await pauseActiveTask(root, args.trim() || undefined);
+      const task = await pauseActiveTask(root, args.trim() || undefined, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No active Project Flow task to pause.", "warning");
         return;
@@ -355,7 +356,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show or refresh the active Project Flow handoff summary",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -369,7 +370,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show or create the active Project Flow task info artifact",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -383,7 +384,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show stable metadata for a Project Flow task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -402,7 +403,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Create a child task under the active Project Flow task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const parent = await loadActiveTask(root);
+      const parent = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
       if (!parent) {
         ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
         return;
@@ -425,7 +426,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show a Project Flow parent/child task tree",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -444,7 +445,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const parsed = parseSubtaskPlanArgs(args);
-      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      const task = await getTaskFromArgsOrActive(root, parsed.query, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -497,7 +498,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const parsed = parseRoleOrchestrationArgs(args);
-      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      const task = await getTaskFromArgsOrActive(root, parsed.query, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -543,7 +544,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const parsed = parseClarifyStartArgs(args);
-      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      const task = await getTaskFromArgsOrActive(root, parsed.query, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -562,7 +563,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show PRD clarification status for a Project Flow task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -576,7 +577,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Answer the current PRD clarification question",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await loadActiveTask(root);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No active Project Flow task. Use /task:switch or /task:new first.", "warning");
         return;
@@ -595,7 +596,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Skip the current PRD clarification question",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await loadActiveTask(root);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No active Project Flow task. Use /task:switch or /task:new first.", "warning");
         return;
@@ -609,7 +610,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Finish PRD clarification without finishing the task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await loadActiveTask(root);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No active Project Flow task. Use /task:switch or /task:new first.", "warning");
         return;
@@ -624,7 +625,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show Project Flow research notes for a task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -646,7 +647,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Add a research note to the active Project Flow task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await loadActiveTask(root);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
         return;
@@ -669,7 +670,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show the active Project Flow plan",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -691,7 +692,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show the next Project Flow plan step",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -726,7 +727,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Create a Project Flow spec proposal from the active task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await loadActiveTask(root);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No active task. Spec updates are tied to task learnings.", "warning");
         return;
@@ -814,7 +815,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show verification checks recorded for the active Project Flow task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -840,7 +841,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show suggested verification commands for the active Project Flow task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -860,7 +861,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Rescan project files and refresh suggested verification commands",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -882,7 +883,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
       const parsed = parseVerificationRemediationArgs(args);
-      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      const task = await getTaskFromArgsOrActive(root, parsed.query, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -920,7 +921,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     description: "Show acceptance criteria for the active Project Flow task",
     handler: async (args, ctx) => {
       const root = await findProjectRoot(ctx.cwd);
-      const task = await getTaskFromArgsOrActive(root, args);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
       if (!task) {
         ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
         return;
@@ -1026,6 +1027,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
         risk: report.totals.missing > 0 ? "medium" : "low",
         origin: { note: note || "upstream sync command" },
         subtaskMode: await readProjectAutoSubtaskMode(root),
+        activeScope: activeTaskScopeFromContext(ctx),
       });
       ctx.ui.notify(`Created upstream sync task ${task.id}`, "info");
     },
@@ -1038,20 +1040,21 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const root = await findProjectRoot(ctx.cwd);
     const prompt = event.prompt || "";
-    const active = await loadActiveTask(root);
+    const activeScope = activeTaskScopeFromContext(ctx);
+    const active = await loadActiveTask(root, activeScope);
     const specs = await readSpecDocuments(root);
     const subtaskMode = await readProjectAutoSubtaskMode(root);
 
     let task = active;
     const activeClarification = task ? await readTaskClarification(root, task.id) : undefined;
     if (task && task.status === "active" && shouldCaptureClarificationAnswer(activeClarification, prompt)) {
-      task = await getOrCreateActiveTask(root, prompt, { subtaskMode });
+      task = await getOrCreateActiveTask(root, prompt, { subtaskMode, activeScope });
       await answerTaskClarification(root, task.id, prompt, "user_prompt");
     } else if (!task && isCodeWorkPrompt(prompt)) {
-      task = await getOrCreateActiveTask(root, prompt, { subtaskMode });
+      task = await getOrCreateActiveTask(root, prompt, { subtaskMode, activeScope });
       ctx.ui.notify(`Project Flow started ${task.id}`, "info");
     } else if (task && task.status === "active") {
-      task = await getOrCreateActiveTask(root, prompt, { subtaskMode });
+      task = await getOrCreateActiveTask(root, prompt, { subtaskMode, activeScope });
     }
 
     if (!task && specs.length === 0) return undefined;
@@ -1082,7 +1085,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       toolName: event.toolName,
       toolCallId: event.toolCallId,
       args: event.args,
-    });
+    }, activeTaskScopeFromContext(ctx));
   });
 
   pi.on("tool_execution_end", async (event, ctx) => {
@@ -1095,30 +1098,30 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       args,
       isError: event.isError,
       resultSummary: summarizeUnknown(event.result),
-    });
+    }, activeTaskScopeFromContext(ctx));
     await refreshStatus(ctx);
   });
 
   pi.on("agent_end", async (_event, ctx) => {
     const root = await findProjectRoot(ctx.cwd);
-    await writeTurnJournal(root, "agent_end");
+    await writeTurnJournal(root, "agent_end", activeTaskScopeFromContext(ctx));
     await refreshStatus(ctx);
   });
 
   pi.on("session_before_compact", async (_event, ctx) => {
     const root = await findProjectRoot(ctx.cwd);
-    await writeTurnJournal(root, "before_compact");
+    await writeTurnJournal(root, "before_compact", activeTaskScopeFromContext(ctx));
     return undefined;
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
     const root = await findProjectRoot(ctx.cwd);
-    await writeTurnJournal(root, "shutdown");
+    await writeTurnJournal(root, "shutdown", activeTaskScopeFromContext(ctx));
   });
 
   async function refreshStatus(ctx: ExtensionContext): Promise<void> {
     const root = await findProjectRoot(ctx.cwd);
-    const task = await loadActiveTask(root);
+    const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
     if (!task || task.status !== "active") {
       ctx.ui.setStatus("project-flow", undefined);
       return;
@@ -1126,17 +1129,27 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     ctx.ui.setStatus("project-flow", `flow ${task.phase}`);
   }
 
-  async function getTaskFromArgsOrActive(root: string, args: string) {
+  async function getTaskFromArgsOrActive(root: string, args: string, scope?: ActiveTaskScope) {
     const query = args.trim();
-    if (!query) return loadActiveTask(root);
+    if (!query) return loadActiveTask(root, scope);
     const result = await resolveTask(root, query);
     if (result.status === "found") return result.task;
     return undefined;
   }
 
+  function activeTaskScopeFromContext(ctx: ExtensionContext): ActiveTaskScope {
+    const raw = ctx as ExtensionContext & {
+      sessionId?: string;
+      sessionPath?: string;
+      sessionManager?: { getSessionId?: () => string | undefined; getSessionFile?: () => string | undefined; getSessionDir?: () => string | undefined };
+    };
+    const id = raw.sessionManager?.getSessionId?.() || raw.sessionId || raw.sessionPath || raw.sessionManager?.getSessionFile?.() || raw.sessionManager?.getSessionDir?.();
+    return id ? { kind: "session", id } : { kind: "project" };
+  }
+
   async function handleTaskClarifyCommand(pi: ExtensionAPI, ctx: ExtensionContext, args: string): Promise<void> {
     const root = await findProjectRoot(ctx.cwd);
-    const task = await loadActiveTask(root);
+    const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
     if (!task) {
       ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
       return;
@@ -1232,7 +1245,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     status: "open" | "done" | "blocked",
   ): Promise<void> {
     const root = await findProjectRoot(ctx.cwd);
-    const task = await loadActiveTask(root);
+    const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
     if (!task) {
       ctx.ui.notify("No active Project Flow task. Use /task:switch or ask for code work first.", "warning");
       return;
@@ -1269,7 +1282,7 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     status: "active" | "done" | "blocked",
   ): Promise<void> {
     const root = await findProjectRoot(ctx.cwd);
-    const task = await loadActiveTask(root);
+    const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
     if (!task) {
       ctx.ui.notify("No active Project Flow task. Use /task:switch or ask for code work first.", "warning");
       return;
