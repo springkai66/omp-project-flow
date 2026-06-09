@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import projectFlowExtension from "../src/index";
-import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readSubtaskPlan, readTaskClarification, readTaskResearch, readVerification } from "../src/core";
+import { createTask, listSpecProposals, loadActiveTask, readAcceptance, readPlan, readRoleOrchestration, readSubtaskPlan, readTaskClarification, readTaskResearch, readVerification } from "../src/core";
 
 type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
@@ -332,6 +332,28 @@ describe("project flow extension", () => {
       expect(plan?.items.some(item => item.status === "created")).toBe(true);
       const active = await loadActiveTask(root);
       expect(active?.id).toBe(task.id);
+    });
+  });
+
+  test("shows and updates role orchestration through the command surface", async () => {
+    await withTempProject(async root => {
+      const fake = createFakePi();
+      projectFlowExtension(fake.pi);
+
+      const task = await createTask(root, [
+        "implement command role orchestration",
+        "- Acceptance: show role handoffs",
+        "- Acceptance: update role status",
+      ].join("\n"));
+
+      await fake.commands.get("task:roles").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("roles: 3");
+
+      await fake.commands.get("task:roles").handler("--start research gathering context", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("research -> in_progress");
+      const roles = await readRoleOrchestration(root, task.id);
+      expect(roles?.roles.find(role => role.id === "research")?.status).toBe("in_progress");
+      expect(roles?.roles.find(role => role.id === "research")?.note).toBe("gathering context");
     });
   });
 

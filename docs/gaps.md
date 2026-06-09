@@ -12,9 +12,10 @@ It also records implemented areas that are useful but still below the depth of T
   - Target behavior: support agent-assisted decomposition for large tasks, with role-aware child execution and stronger dependency ordering.
 
 - Real research / implement / check agent orchestration
-  - Status: missing.
-  - Current behavior: Project Flow injects workflow context and state files for the current agent, but it does not launch independent role-based agents.
-  - Target behavior: define role prompts, handoff artifacts, state ownership, and check outputs for research, implementation, and review roles while keeping the main OMP runtime in control.
+  - Status: partial.
+  - Current behavior: Project Flow now generates `roles/` handoff packets for research, implement, and check roles, tracks role status through `/task:roles`, records owned artifacts / expected outputs / role-local checks, and injects summaries into task info, snapshots, and hidden context.
+  - Remaining gap: Project Flow still does not launch independent role-based agents automatically; role packets are executed by the main OMP session or manually launched agents.
+  - Target behavior: launch or coordinate independent role sessions when OMP exposes a safe runtime API, while preserving explicit state ownership, handoff artifacts, and check outputs.
 
 - Automatic verification remediation loop
   - Status: partial.

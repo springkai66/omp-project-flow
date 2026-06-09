@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.0
+
+- Added role orchestration handoffs for `research`, `implement`, and `check` roles under each task's `roles/` directory.
+- Added `/task:roles` to show, refresh, start, complete, or block role handoffs.
+- Role summaries now flow into task info, snapshots, and hidden context.
+
 ## 0.17.0
 
 - Exposed `autoSubtaskMode` as an OMP plugin setting with `off`, `suggest`, and `auto` policies.

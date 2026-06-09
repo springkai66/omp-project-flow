@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { AutoSubtaskMode, ClarificationState, TaskState } from "./core";
+import type { AutoSubtaskMode, ClarificationState, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
@@ -17,6 +17,7 @@ import {
   formatAcceptanceSummary,
   formatClarificationPrompt,
   formatClarificationSummary,
+  formatRoleOrchestrationSummary,
   formatProjectOverviewSummary,
   formatReadinessSummary,
   formatResearchSummary,
@@ -44,6 +45,7 @@ import {
   refreshSubtaskPlanArtifacts,
   readTaskClarification,
   readTaskInfo,
+  readRoleOrchestration,
   readSubtaskPlan,
   readTaskReadiness,
   readTaskResearch,
@@ -60,8 +62,10 @@ import {
   startTaskClarification,
   summarizeUnknown,
   finishTaskClarification,
+  updateRoleOrchestrationStatus,
   updateAcceptanceItem,
   writeTaskHandoff,
+  writeRoleOrchestration,
   writeTaskInfo,
   writeSubtaskPlan,
   writeTaskReadiness,
@@ -480,6 +484,45 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       }
       await refreshSubtaskPlanArtifacts(root, task.id, parsed.action === "refresh" ? "subtask_plan_refreshed" : "subtask_plan_shown");
       ctx.ui.notify(formatSubtaskPlanSummary(plan, 12), plan.items.length > 0 ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("task:roles", {
+    description: "Show, refresh, or update Project Flow role handoffs",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const parsed = parseRoleOrchestrationArgs(args);
+      const task = await getTaskFromArgsOrActive(root, parsed.query);
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      if (parsed.action === "start" || parsed.action === "done" || parsed.action === "block") {
+        if (!parsed.role) {
+          ctx.ui.notify("Usage: /task:roles [id] --start|--done|--block <research|implement|check> [note]", "warning");
+          return;
+        }
+        const status: TaskRoleStatus = parsed.action === "start" ? "in_progress" : parsed.action === "done" ? "done" : "blocked";
+        const result = await updateRoleOrchestrationStatus(root, task.id, parsed.role, status, parsed.note);
+        if (result.status !== "updated" || !result.plan || !result.role) {
+          ctx.ui.notify(result.status === "missing" ? `No matching Project Flow task for ${task.id}.` : `Unknown role ${parsed.role}.`, "warning");
+          return;
+        }
+        ctx.ui.notify([
+          `Updated role ${result.role.id} -> ${result.role.status}`,
+          formatRoleOrchestrationSummary(result.plan, 3),
+        ].join("\n"), result.role.status === "blocked" ? "warning" : "info");
+        return;
+      }
+      const roles = parsed.action === "refresh"
+        ? await writeRoleOrchestration(root, task, "command_refresh")
+        : (await readRoleOrchestration(root, task.id)) || await writeRoleOrchestration(root, task, "command");
+      if (parsed.action === "refresh") {
+        await writeTaskInfo(root, task, "role_orchestration_refreshed", { refreshRoles: true });
+        await writeTaskSnapshot(root, task, "role_orchestration_refreshed");
+        await writeTaskHandoff(root, task, "role_orchestration_refreshed");
+      }
+      ctx.ui.notify(formatRoleOrchestrationSummary(roles, 3), roles.roles.some(role => role.status === "blocked") ? "warning" : "info");
     },
   });
 
@@ -1282,9 +1325,45 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     return { action, mode, query: queryParts.join(" ") };
   }
 
+  function parseRoleOrchestrationArgs(args: string): { action: "show" | "refresh" | "start" | "done" | "block"; query: string; role?: TaskRoleId; note?: string } {
+    const parts = args.trim().split(/\s+/).filter(Boolean);
+    let action: "show" | "refresh" | "start" | "done" | "block" = "show";
+    let role: TaskRoleId | undefined;
+    const queryParts: string[] = [];
+    const noteParts: string[] = [];
+    let collectingNote = false;
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      if (collectingNote) {
+        noteParts.push(part);
+        continue;
+      }
+      if (part === "--refresh" || part === "refresh") {
+        action = "refresh";
+        continue;
+      }
+      if (part === "--start" || part === "start" || part === "--done" || part === "done" || part === "--block" || part === "block") {
+        action = part.replace(/^--/, "") as "start" | "done" | "block";
+        if (isTaskRoleArg(parts[i + 1])) {
+          role = parts[i + 1];
+          i += 1;
+          collectingNote = true;
+        }
+        continue;
+      }
+      queryParts.push(part);
+    }
+    return { action, query: queryParts.join(" "), role, note: noteParts.join(" ").trim() || undefined };
+  }
+
+  function isTaskRoleArg(value: string | undefined): value is TaskRoleId {
+    return value === "research" || value === "implement" || value === "check";
+  }
+
   function isSubtaskModeArg(value: string | undefined): value is AutoSubtaskMode {
     return value === "off" || value === "suggest" || value === "auto";
   }
+
 
   function parseFinishArgs(args: string): { note?: string; force: boolean } {
     const parts = args.trim().split(/\s+/).filter(Boolean);

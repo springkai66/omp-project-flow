@@ -106,6 +106,7 @@ export interface ContextBundle {
   subtasks?: string;
   subtaskPlan?: SubtaskPlan;
   research?: ResearchState;
+  roles?: RoleOrchestrationPlan;
   info?: string;
   upstreamReport?: UpstreamSyncReport;
   content: string;
@@ -167,6 +168,7 @@ export interface TaskSnapshot {
   subtasks?: string;
   subtaskPlan?: SubtaskPlan;
   research?: ResearchState;
+  roles?: RoleOrchestrationPlan;
   info?: string;
   handoff?: string;
 }
@@ -313,6 +315,32 @@ export interface SubtaskPlanApplyResult {
   task?: TaskState;
   plan?: SubtaskPlan;
   created: TaskState[];
+}
+
+export type TaskRoleId = "research" | "implement" | "check";
+export type TaskRoleStatus = "pending" | "in_progress" | "done" | "blocked";
+
+export interface RoleOrchestrationRole {
+  id: TaskRoleId;
+  title: string;
+  status: TaskRoleStatus;
+  owner: string;
+  prompt: string;
+  inputs: string[];
+  ownedArtifacts: string[];
+  expectedOutputs: string[];
+  checks: string[];
+  updatedAt: string;
+  note?: string;
+}
+
+export interface RoleOrchestrationPlan {
+  taskId: string;
+  generatedAt: string;
+  updatedAt: string;
+  generatedFrom?: string;
+  summary: string;
+  roles: RoleOrchestrationRole[];
 }
 
 export interface ProjectOverview {
@@ -1440,17 +1468,18 @@ export async function writeTaskInfo(
   root: string,
   task: TaskState,
   reason = "update",
-  options: { force?: boolean; refreshSubtasks?: boolean } = {},
+  options: { force?: boolean; refreshSubtasks?: boolean; refreshRoles?: boolean } = {},
 ): Promise<string> {
   const taskDir = path.join(getProjectPaths(root).tasksDir, task.id);
   await mkdir(taskDir, { recursive: true });
   const infoPath = path.join(taskDir, "info.md");
   const existing = await readTaskInfo(root, task.id);
   const currentTask = await loadTask(root, task.id) || task;
-  if (existing !== undefined && !options.force && options.refreshSubtasks) {
+  if (existing !== undefined && !options.force && (options.refreshSubtasks || options.refreshRoles)) {
     const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
     const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
-    const content = updateTaskInfoGeneratedSections(existing, subtaskSummary, subtaskPlan);
+    const roles = await readRoleOrchestration(root, currentTask.id);
+    const content = updateTaskInfoGeneratedSections(existing, subtaskSummary, subtaskPlan, roles);
     await writeFile(infoPath, content, "utf8");
     return content;
   }
@@ -1464,16 +1493,21 @@ export async function writeTaskInfo(
   ]);
   const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
   const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
-  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, subtaskPlan, reason);
+  const roles = await readRoleOrchestration(root, currentTask.id);
+  const content = formatTaskInfo(currentTask, acceptance, plan, verificationStrategy, research, clarification, subtaskSummary, subtaskPlan, roles, reason);
   await writeFile(infoPath, content, "utf8");
   return content;
 }
 
-function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string, subtaskPlan: SubtaskPlan | undefined): string {
+function updateTaskInfoGeneratedSections(content: string, subtaskSummary: string, subtaskPlan: SubtaskPlan | undefined, roles?: RoleOrchestrationPlan): string {
   return updateTaskInfoSection(
-    updateTaskInfoSection(content, "Subtasks", subtaskSummary),
-    "Subtask Plan",
-    subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
+    updateTaskInfoSection(
+      updateTaskInfoSection(content, "Subtasks", subtaskSummary),
+      "Subtask Plan",
+      subtaskPlan ? formatSubtaskPlanSummary(subtaskPlan, 12) : "No subtask plan recorded yet.",
+    ),
+    "Role Orchestration",
+    roles ? formatRoleOrchestrationSummary(roles, 3) : "No role orchestration plan recorded yet.",
   );
 }
 
@@ -1871,6 +1905,7 @@ export async function createTask(root: string, prompt: string, options: CreateTa
     await writeFile(paths.activeTaskPath, `${JSON.stringify({ id, updatedAt: now }, null, 2)}\n`, "utf8");
   }
   await appendTaskEvent(root, id, { type: "task_created", timestamp: now, data: { prompt } });
+  await writeRoleOrchestration(root, task, "created");
   await writeTaskHandoff(root, task, "created");
   return task;
 }
@@ -2488,6 +2523,319 @@ function isSubtaskPlanItemStatus(value: unknown): value is SubtaskPlanItemStatus
   return value === "suggested" || value === "created" || value === "skipped";
 }
 
+export interface RoleOrchestrationUpdateResult {
+  status: "updated" | "missing" | "role_missing";
+  plan?: RoleOrchestrationPlan;
+  role?: RoleOrchestrationRole;
+}
+
+export async function readRoleOrchestration(root: string, taskId: string): Promise<RoleOrchestrationPlan | undefined> {
+  const planPath = path.join(getProjectPaths(root).tasksDir, taskId, "roles", "plan.json");
+  if (!(await pathExists(planPath))) return undefined;
+  try {
+    return normalizeRoleOrchestrationPlan(JSON.parse(await readFile(planPath, "utf8")) as Partial<RoleOrchestrationPlan>);
+  } catch {
+    return undefined;
+  }
+}
+
+export async function writeRoleOrchestration(root: string, task: TaskState, reason = "manual"): Promise<RoleOrchestrationPlan> {
+  const currentTask = await loadTask(root, task.id) || task;
+  const existing = await readRoleOrchestration(root, currentTask.id);
+  const now = new Date().toISOString();
+  const [acceptance, plan, strategy] = await Promise.all([
+    readAcceptance(root, currentTask.id),
+    readPlan(root, currentTask.id),
+    readVerificationStrategy(root, currentTask.id),
+  ]);
+  const existingById = new Map((existing?.roles || []).map(role => [role.id, role]));
+  const roles = buildRoleOrchestrationRoles(currentTask, acceptance, plan, strategy, now).map(role => {
+    const previous = existingById.get(role.id);
+    return previous
+      ? { ...role, status: previous.status, note: previous.note, updatedAt: previous.updatedAt || role.updatedAt }
+      : role;
+  });
+  const rolePlan = normalizeRoleOrchestrationPlan({
+    taskId: currentTask.id,
+    generatedAt: existing?.generatedAt || now,
+    updatedAt: now,
+    generatedFrom: reason,
+    summary: summarizeRoleOrchestration(roles),
+    roles,
+  }) || {
+    taskId: currentTask.id,
+    generatedAt: now,
+    updatedAt: now,
+    generatedFrom: reason,
+    summary: "No role orchestration plan generated.",
+    roles: [],
+  };
+  await persistRoleOrchestration(root, currentTask, rolePlan);
+  await appendTaskEvent(root, currentTask.id, {
+    type: "role_orchestration_updated",
+    timestamp: now,
+    data: { reason, roles: rolePlan.roles.map(role => ({ id: role.id, status: role.status })) },
+  });
+  return rolePlan;
+}
+
+export async function updateRoleOrchestrationStatus(
+  root: string,
+  taskId: string,
+  roleId: TaskRoleId,
+  status: TaskRoleStatus,
+  note?: string,
+): Promise<RoleOrchestrationUpdateResult> {
+  const task = await loadTask(root, taskId);
+  if (!task) return { status: "missing" };
+  const current = await readRoleOrchestration(root, taskId) || await writeRoleOrchestration(root, task, "role_status_seed");
+  const now = new Date().toISOString();
+  let updatedRole: RoleOrchestrationRole | undefined;
+  const roles = current.roles.map(role => {
+    if (role.id !== roleId) return role;
+    updatedRole = { ...role, status, note: note?.trim() || undefined, updatedAt: now };
+    return updatedRole;
+  });
+  if (!updatedRole) return { status: "role_missing", plan: current };
+  const nextPlan = normalizeRoleOrchestrationPlan({
+    ...current,
+    updatedAt: now,
+    generatedFrom: "role_status",
+    summary: summarizeRoleOrchestration(roles),
+    roles,
+  }) || current;
+  await persistRoleOrchestration(root, task, nextPlan);
+  await appendTaskEvent(root, task.id, {
+    type: "role_status_updated",
+    timestamp: now,
+    data: { roleId, status, note },
+  });
+  await writeTaskInfo(root, task, "role_status_updated", { refreshRoles: true });
+  await writeTaskSnapshot(root, task, "role_status_updated");
+  await writeTaskHandoff(root, task, "role_status_updated");
+  return { status: "updated", plan: nextPlan, role: updatedRole };
+}
+
+export function formatRoleOrchestration(plan: RoleOrchestrationPlan): string {
+  return [
+    "# Role Orchestration Plan",
+    "",
+    `Task: ${plan.taskId}`,
+    `Updated: ${plan.updatedAt}`,
+    plan.generatedFrom ? `Reason: ${plan.generatedFrom}` : undefined,
+    "",
+    "## Summary",
+    "",
+    plan.summary,
+    "",
+    "## Roles",
+    "",
+    plan.roles.length === 0 ? "No role handoffs generated." : plan.roles.map(formatRoleOrchestrationRole).join("\n\n"),
+    "",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+export function formatRoleOrchestrationSummary(plan: RoleOrchestrationPlan, max = 3): string {
+  const counts = countRoleStatuses(plan.roles);
+  return [
+    `roles: ${plan.roles.length} (${counts.pending} pending, ${counts.in_progress} in progress, ${counts.done} done, ${counts.blocked} blocked)`,
+    plan.roles.length > 0 ? ["handoffs:", ...plan.roles.slice(0, max).map(role => `- ${role.id} [${role.status}] owner: ${role.owner}${role.note ? ` - ${role.note}` : ""}`)].join("\n") : "handoffs: none",
+  ].join("\n");
+}
+
+function buildRoleOrchestrationRoles(
+  task: TaskState,
+  acceptance: AcceptanceState,
+  plan: PlanState,
+  strategy: VerificationStrategy,
+  now: string,
+): RoleOrchestrationRole[] {
+  const goal = task.title || task.id;
+  const acceptanceLines = acceptance.items.slice(0, 6).map(item => `${item.id} [${item.status}] ${item.text}`);
+  const planLines = plan.steps.slice(0, 6).map(step => `${step.id} [${step.status}] ${step.text}`);
+  const checkCommands = strategy.suggestions.slice(0, 5).map(item => `${item.command} (${item.confidence}: ${item.reason})`);
+  return [
+    {
+      id: "research",
+      title: "Research role",
+      status: "pending",
+      owner: "research agent or main agent in research mode",
+      prompt: formatRolePromptText("Research", goal, [
+        "Inspect relevant code, docs, specs, upstream references, and risks before implementation.",
+        "Record source-grounded findings, decisions, and open questions. Do not edit implementation files.",
+        "Stop with BLOCKED if required context is unavailable instead of guessing.",
+      ], acceptanceLines),
+      inputs: ["prd.md", "acceptance.json", "plan.md", "docs/gaps.md"],
+      ownedArtifacts: ["research/research.json", "research/notes.md", "info.md"],
+      expectedOutputs: ["Findings with source paths or URLs", "Risks and open questions", "Implementation boundaries"],
+      checks: ["Research notes cite observed files or upstream sources", "No implementation files changed by research role"],
+      updatedAt: now,
+    },
+    {
+      id: "implement",
+      title: "Implementation role",
+      status: "pending",
+      owner: "implementation agent or main agent in implementation mode",
+      prompt: formatRolePromptText("Implement", goal, [
+        "Use the research handoff and current plan to make the smallest coherent code change.",
+        "Update affected call sites, tests, docs, and acceptance evidence together.",
+        "Avoid scope growth: no retries, abstractions, or placeholders unless explicitly required.",
+      ], [...acceptanceLines, ...planLines]),
+      inputs: ["prd.md", "research/notes.md", "plan.md", "acceptance.json"],
+      ownedArtifacts: ["plan.json", "plan.md", "acceptance.json", "changed source/test/doc files"],
+      expectedOutputs: ["Implemented behavior", "Updated tests or docs", "Acceptance evidence"],
+      checks: ["Code mirrors existing project patterns", "No unrelated files changed", "No TODO or placeholder implementation shipped"],
+      updatedAt: now,
+    },
+    {
+      id: "check",
+      title: "Check role",
+      status: "pending",
+      owner: "review/check agent or main agent in verification mode",
+      prompt: formatRolePromptText("Check", goal, [
+        "Run targeted verification and review the implementation against acceptance criteria.",
+        "Record command evidence, failures, fix recommendations, and remaining gaps.",
+        "Do not mark work complete while verification is missing or failing.",
+      ], checkCommands.length > 0 ? checkCommands : ["Use the smallest relevant project verification command."]),
+      inputs: ["verification-strategy.json", "acceptance.json", "readiness.md", "changed source/test/doc files"],
+      ownedArtifacts: ["verification.json", "verification-strategy.json", "readiness.json", "readiness.md", "snapshot.md"],
+      expectedOutputs: ["Pass/fail verification evidence", "Review findings", "Readiness decision"],
+      checks: checkCommands.length > 0 ? checkCommands : ["Run or document the smallest relevant verification"],
+      updatedAt: now,
+    },
+  ];
+}
+
+function formatRolePromptText(role: string, goal: string, instructions: string[], context: string[]): string {
+  return [
+    `${role}: ${goal}`,
+    "",
+    "Instructions:",
+    ...instructions.map(item => `- ${item}`),
+    "",
+    "Context:",
+    ...(context.length > 0 ? context.map(item => `- ${item}`) : ["- No extra context recorded yet."]),
+  ].join("\n");
+}
+
+async function persistRoleOrchestration(root: string, task: TaskState, plan: RoleOrchestrationPlan): Promise<void> {
+  const rolesDir = path.join(getProjectPaths(root).tasksDir, task.id, "roles");
+  await mkdir(rolesDir, { recursive: true });
+  await writeFile(path.join(rolesDir, "plan.json"), `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+  await writeFile(path.join(rolesDir, "plan.md"), formatRoleOrchestration(plan), "utf8");
+  for (const role of plan.roles) {
+    await writeFile(path.join(rolesDir, `${role.id}.md`), formatRoleHandoff(plan, role), "utf8");
+  }
+}
+
+function formatRoleHandoff(plan: RoleOrchestrationPlan, role: RoleOrchestrationRole): string {
+  return [
+    `# ${role.title}`,
+    "",
+    `Task: ${plan.taskId}`,
+    `Role: ${role.id}`,
+    `Status: ${role.status}`,
+    `Owner: ${role.owner}`,
+    role.note ? `Note: ${role.note}` : undefined,
+    "",
+    "## Prompt",
+    "",
+    role.prompt,
+    "",
+    "## Inputs",
+    "",
+    formatResumeList(role.inputs, "No inputs recorded."),
+    "",
+    "## Owned Artifacts",
+    "",
+    formatResumeList(role.ownedArtifacts, "No owned artifacts recorded."),
+    "",
+    "## Expected Outputs",
+    "",
+    formatResumeList(role.expectedOutputs, "No expected outputs recorded."),
+    "",
+    "## Checks",
+    "",
+    formatResumeList(role.checks, "No role checks recorded."),
+    "",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function formatRoleOrchestrationRole(role: RoleOrchestrationRole): string {
+  return [
+    `### ${role.id}: ${role.title}`,
+    "",
+    `- status: ${role.status}`,
+    `- owner: ${role.owner}`,
+    role.note ? `- note: ${role.note}` : undefined,
+    "- inputs:",
+    ...role.inputs.map(item => `  - ${item}`),
+    "- owned artifacts:",
+    ...role.ownedArtifacts.map(item => `  - ${item}`),
+    "- expected outputs:",
+    ...role.expectedOutputs.map(item => `  - ${item}`),
+    "- checks:",
+    ...role.checks.map(item => `  - ${item}`),
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function normalizeRoleOrchestrationPlan(value: Partial<RoleOrchestrationPlan> | undefined): RoleOrchestrationPlan | undefined {
+  if (!value || typeof value.taskId !== "string" || typeof value.generatedAt !== "string" || typeof value.updatedAt !== "string") return undefined;
+  const roles = Array.isArray(value.roles)
+    ? value.roles.map(normalizeRoleOrchestrationRole).filter((role): role is RoleOrchestrationRole => !!role).slice(0, 3)
+    : [];
+  return {
+    taskId: value.taskId,
+    generatedAt: value.generatedAt,
+    updatedAt: value.updatedAt,
+    generatedFrom: typeof value.generatedFrom === "string" ? value.generatedFrom : undefined,
+    summary: typeof value.summary === "string" && value.summary.trim() ? value.summary : summarizeRoleOrchestration(roles),
+    roles,
+  };
+}
+
+function normalizeRoleOrchestrationRole(value: unknown): RoleOrchestrationRole | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (!isTaskRoleId(record.id) || typeof record.title !== "string" || typeof record.prompt !== "string") return undefined;
+  return {
+    id: record.id,
+    title: record.title.trim() || record.id,
+    status: isTaskRoleStatus(record.status) ? record.status : "pending",
+    owner: typeof record.owner === "string" && record.owner.trim() ? record.owner.trim() : record.id,
+    prompt: record.prompt.trim(),
+    inputs: normalizeStringArray(record.inputs).slice(0, 12),
+    ownedArtifacts: normalizeStringArray(record.ownedArtifacts).slice(0, 12),
+    expectedOutputs: normalizeStringArray(record.expectedOutputs).slice(0, 12),
+    checks: normalizeStringArray(record.checks).slice(0, 12),
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : new Date().toISOString(),
+    note: typeof record.note === "string" && record.note.trim() ? record.note.trim() : undefined,
+  };
+}
+
+function summarizeRoleOrchestration(roles: RoleOrchestrationRole[]): string {
+  if (roles.length === 0) return "No role handoffs generated.";
+  const counts = countRoleStatuses(roles);
+  return `${roles.length} role handoff(s): ${counts.pending} pending, ${counts.in_progress} in progress, ${counts.done} done, ${counts.blocked} blocked.`;
+}
+
+function countRoleStatuses(roles: RoleOrchestrationRole[]): Record<TaskRoleStatus, number> {
+  return {
+    pending: roles.filter(role => role.status === "pending").length,
+    in_progress: roles.filter(role => role.status === "in_progress").length,
+    done: roles.filter(role => role.status === "done").length,
+    blocked: roles.filter(role => role.status === "blocked").length,
+  };
+}
+
+function isTaskRoleId(value: unknown): value is TaskRoleId {
+  return value === "research" || value === "implement" || value === "check";
+}
+
+function isTaskRoleStatus(value: unknown): value is TaskRoleStatus {
+  return value === "pending" || value === "in_progress" || value === "done" || value === "blocked";
+}
+
 export async function finishActiveTask(root: string, note?: string, options: { force?: boolean } = {}): Promise<TaskState | undefined> {
   const paths = getProjectPaths(root);
   const task = await loadActiveTask(root);
@@ -3022,9 +3370,10 @@ export async function buildContextBundle(root: string, prompt: string, task?: Ta
   const info = snapshot?.info;
   const subtaskSummary = task ? await formatSubtaskTreeSummary(root, task, 8) : undefined;
   const subtaskPlan = task ? await readSubtaskPlan(root, task.id) : undefined;
+  const roles = task ? await readRoleOrchestration(root, task.id) : undefined;
   const upstreamReport = shouldIncludeUpstreamSyncContext(prompt, task) ? await writeUpstreamSyncReport(root, "context") : undefined;
-  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, subtaskSummary, subtaskPlan, research, info, upstreamReport);
-  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, subtaskPlan, research, info, upstreamReport, content };
+  const content = formatContextBundle(root, scored, task, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, clarification, subtaskSummary, subtaskPlan, roles, research, info, upstreamReport);
+  return { root, task, specs: scored, clarification, acceptance, plan, verificationStrategy, handoff, resume, readiness, snapshot, subtasks: subtaskSummary, subtaskPlan, roles, research, info, upstreamReport, content };
 }
 
 export function formatContextBundle(
@@ -3041,6 +3390,7 @@ export function formatContextBundle(
   clarification?: ClarificationState,
   subtasks?: string,
   subtaskPlan?: SubtaskPlan,
+  roles?: RoleOrchestrationPlan,
   research?: ResearchState,
   info?: string,
   upstreamReport?: UpstreamSyncReport,
@@ -3073,6 +3423,9 @@ export function formatContextBundle(
     }
     if (subtaskPlan && subtaskPlan.items.length > 0) {
       lines.push("", "Subtask plan:", formatSubtaskPlanSummary(subtaskPlan, 6));
+    }
+    if (roles) {
+      lines.push("", "Role orchestration:", formatRoleOrchestrationSummary(roles, 3));
     }
     if (acceptance) {
       lines.push("", "Acceptance:", formatAcceptanceSummary(acceptance, 6));
@@ -3697,6 +4050,7 @@ function formatTaskInfo(
   clarification: ClarificationState | undefined,
   subtaskSummary: string,
   subtaskPlan: SubtaskPlan | undefined,
+  roles: RoleOrchestrationPlan | undefined,
   reason: string,
 ): string {
   return [
@@ -3720,6 +4074,10 @@ function formatTaskInfo(
     "## Subtasks",
     "",
     subtaskSummary,
+    "",
+    "## Role Orchestration",
+    "",
+    roles ? formatRoleOrchestrationSummary(roles, 3) : "No role orchestration plan recorded yet.",
     "",
     "## Subtask Plan",
     "",
@@ -4486,6 +4844,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
   const info = await writeTaskInfo(root, currentTask, reason);
   const subtaskSummary = await formatSubtaskTreeSummary(root, currentTask, 12);
   const subtaskPlan = await readSubtaskPlan(root, currentTask.id);
+  const roles = await readRoleOrchestration(root, currentTask.id);
   const recentEvents = events.slice(-20).map(event => ({
     type: event.type,
     timestamp: event.timestamp,
@@ -4511,6 +4870,7 @@ async function buildTaskSnapshot(root: string, task: TaskState, reason: string):
     clarification,
     subtasks: subtaskSummary,
     subtaskPlan,
+    roles,
     research,
     info,
     handoff,
@@ -4551,6 +4911,10 @@ export function formatTaskSnapshot(snapshot: TaskSnapshot): string {
     "## Subtask Plan",
     "",
     snapshot.subtaskPlan ? formatSubtaskPlanSummary(snapshot.subtaskPlan, 12) : "No subtask plan recorded yet.",
+    "",
+    "## Role Orchestration",
+    "",
+    snapshot.roles ? formatRoleOrchestrationSummary(snapshot.roles, 3) : "No role orchestration plan recorded yet.",
     "",
     "## Clarification",
     "",
@@ -4609,6 +4973,7 @@ export function formatSnapshotSummary(snapshot: TaskSnapshot): string {
     snapshot.task.metadata ? `metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : undefined,
     snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `subtasks: ${snapshot.subtasks.split(/\r?\n/)[0]}` : undefined,
     snapshot.subtaskPlan && snapshot.subtaskPlan.items.length > 0 ? `subtask plan: ${countSubtaskPlanItems(snapshot.subtaskPlan.items).suggested} suggested` : undefined,
+    snapshot.roles ? `roles: ${formatRoleOrchestrationSummary(snapshot.roles, 3).split(/\r?\n/)[0]}` : undefined,
     snapshot.clarification ? `clarification: ${snapshot.clarification.status}` : undefined,
     `acceptance: ${snapshot.acceptance.items.filter(item => item.status === "done").length}/${snapshot.acceptance.items.length} done`,
     `verification: ${snapshot.verification.checks.length} check(s)`,
@@ -4625,6 +4990,7 @@ function formatSnapshotContext(snapshot: TaskSnapshot, max = 1200): string {
     snapshot.task.metadata ? `- metadata: ${formatTaskMetadataInline(snapshot.task.metadata)}` : "- metadata: none",
     snapshot.subtasks && snapshot.subtasks !== "No subtasks recorded." ? `- subtasks: ${snapshot.subtasks.replace(/\r?\n/g, "; ")}` : "- subtasks: none",
     snapshot.subtaskPlan && snapshot.subtaskPlan.items.length > 0 ? `- subtask plan: ${formatSubtaskPlanSummary(snapshot.subtaskPlan, 4).replace(/\r?\n/g, "; ")}` : "- subtask plan: none",
+    snapshot.roles ? `- roles: ${formatRoleOrchestrationSummary(snapshot.roles, 3).replace(/\r?\n/g, "; ")}` : "- roles: none",
     snapshot.clarification ? `- clarification: ${snapshot.clarification.status}, ${openClarificationQuestions(snapshot.clarification).length} open` : "- clarification: none",
     `- touched files: ${snapshot.touchedFiles.slice(0, 8).join(", ") || "none inferred"}`,
   ].join("\n");

@@ -26,6 +26,7 @@ import {
   readPlan,
   readAcceptance,
   refreshSubtaskPlanArtifacts,
+  readRoleOrchestration,
   readSubtaskPlan,
   readTaskReadiness,
   readTaskResume,
@@ -49,6 +50,7 @@ import {
   startTaskClarification,
   advancePlan,
   updateAcceptanceItem,
+  updateRoleOrchestrationStatus,
   updateUpstreamSource,
   finishTaskClarification,
   writeProjectOverview,
@@ -283,6 +285,41 @@ describe("project flow core", () => {
       }, null, 2));
 
       expect(await readProjectAutoSubtaskMode(root)).toBe("off");
+    });
+  });
+
+  test("creates role orchestration handoffs for new tasks", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, [
+        "implement role orchestration packets",
+        "- Acceptance: research handoff exists",
+        "- Acceptance: implementation handoff exists",
+        "- Acceptance: check handoff exists",
+      ].join("\n"));
+
+      const roles = await readRoleOrchestration(root, task.id);
+      expect(roles?.roles.map(role => role.id)).toEqual(["research", "implement", "check"]);
+      expect(roles?.roles.every(role => role.status === "pending")).toBe(true);
+      const researchPrompt = await readFile(path.join(root, ".project-flow", "tasks", task.id, "roles", "research.md"), "utf8");
+      expect(researchPrompt).toContain("Role: research");
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("## Role Orchestration");
+    });
+  });
+
+  test("updates role status and refreshes role artifacts", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "verify role status updates\n- Acceptance: status persists");
+
+      const result = await updateRoleOrchestrationStatus(root, task.id, "research", "in_progress", "gathering upstream sources");
+      expect(result.status).toBe("updated");
+      const roles = await readRoleOrchestration(root, task.id);
+      expect(roles?.roles.find(role => role.id === "research")?.status).toBe("in_progress");
+      expect(roles?.roles.find(role => role.id === "research")?.note).toBe("gathering upstream sources");
+      const snapshot = await readTaskSnapshot(root, task.id);
+      expect(snapshot?.roles?.roles.find(role => role.id === "research")?.status).toBe("in_progress");
     });
   });
 
