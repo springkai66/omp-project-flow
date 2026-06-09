@@ -82,6 +82,8 @@ describe("project flow extension", () => {
       expect(fake.commands.has("prd:refine")).toBe(true);
       expect(fake.commands.has("research:status")).toBe(true);
       expect(fake.commands.has("research:add")).toBe(true);
+      expect(fake.commands.has("research:summary")).toBe(true);
+      expect(fake.commands.has("research:add-source")).toBe(true);
       expect(fake.commands.has("verify:status")).toBe(true);
       expect(fake.commands.has("verify:suggest")).toBe(true);
       expect(fake.commands.has("verify:refresh")).toBe(true);
@@ -282,6 +284,16 @@ describe("project flow extension", () => {
       const research = await readTaskResearch(root, task.id);
       expect(research?.items[0]?.summary).toBe("Found a useful API detail");
       expect(fake.notifications.at(-1)?.message).toContain("research items: 1");
+
+      await fake.commands.get("research:add-source").handler('--source docs/gaps.md --claim "Gaps require source packs" --excerpt "structured source packs" --confidence high --risk "manual upstream review"', fake.ctx(root));
+      const sourcedResearch = await readTaskResearch(root, task.id);
+      expect(sourcedResearch?.sourcePacks[0]?.source).toBe("docs/gaps.md");
+      expect(sourcedResearch?.sourcePacks[0]?.claim).toBe("Gaps require source packs");
+      expect(fake.notifications.at(-1)?.message).toContain("source packs: 1");
+
+      await fake.commands.get("research:summary").handler("", fake.ctx(root));
+      expect(fake.notifications.at(-1)?.message).toContain("Research summary");
+      expect(fake.notifications.at(-1)?.message).toContain("docs/gaps.md");
 
       await fake.commands.get("research:status").handler("", fake.ctx(root));
       expect(fake.notifications.at(-1)?.message).toContain(`Research for ${task.id}`);

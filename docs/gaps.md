@@ -50,9 +50,9 @@ It also records implemented areas that are useful but still below the depth of T
 
 - Research artifacts and `info.md`
   - Status: implemented, below ECC/Trellis depth.
-  - Current behavior: each task can store `research/research.json`, `research/notes.md`, and `info.md`, and summaries flow into context, snapshots, and spec proposals.
-  - Gap: research is mostly manually appended or prompt-derived; there is no dedicated research role, source extraction pipeline, citation/source pack structure, or confidence tracking.
-  - Target behavior: add structured source packs, research questions, findings, decisions, confidence levels, and optional research-agent handoff.
+  - Current behavior: each task can store `research/research.json`, `research/source-packs.json`, `research/notes.md`, and `info.md`; source packs record reviewed source, source kind, claim, excerpt, confidence, related item ids, and open risks; summaries flow into context, handoff, snapshots, and spec proposals.
+  - Gap: there is still no autonomous research agent or source extraction pipeline; source packs are explicitly added by the agent/user after reviewing repo or upstream artifacts.
+  - Target behavior: add optional research-agent handoff, richer source extraction, and confidence/risk review workflows while keeping review-first state ownership.
 
 - Handoff / resume / snapshot artifacts
   - Status: implemented, below OMO/Superpowers depth.

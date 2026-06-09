@@ -225,6 +225,8 @@ Subtasks are ordinary tasks linked through `metadata.relationships.parentTaskId`
 
 Role orchestration records role prompts, owned artifacts, expected outputs, and role-local checks for research, implementation, and verification/review. It does not launch independent agents by itself; it provides explicit handoff packets and status tracking so a main OMP session or manually launched role agent can execute without guessing ownership.
 
+Research artifacts live under each task's `research/` directory. Notes remain in `research/notes.md`, while reviewed evidence can be captured as source packs in `research/source-packs.json` with kind, source path/URL, claim, excerpt, confidence, and open risks. Use `/research:add-source --source <path-or-url> --claim <claim> [--excerpt <text>] [--confidence low|medium|high]` to add reviewed evidence and `/research:summary` to inspect it. Upstream/parity tasks get a readiness warning when no reviewed source pack exists; this is review guidance, not an autonomous research claim.
+
 Verification suggestions are inferred from common project files such as `package.json`, `pyproject.toml`, `pytest.ini`, `Cargo.toml`, `go.mod`, `.sln`, `.csproj`, and `Makefile`. Project Flow also writes a reviewable verification policy matrix into each `verification-strategy.json`: touched-file categories are matched to suggested checks, successful recorded commands mark rows covered, and readiness/resume packs surface remaining coverage gaps without running commands silently. When checks fail, `/verify:remediate` creates an opt-in loop with failed check evidence, bounded attempts, stop conditions, and explicit pass/fail/stop status. It never runs fix or verification commands silently; the loop records what the agent/user chose to do and what evidence came back.
 
 Spec proposals are saved for review under `.project-flow/spec-proposals/`. They are not applied to `.project-flow/spec/` unless you explicitly run `/spec:apply`.
@@ -255,6 +257,11 @@ This package is marked `private` to avoid accidental npm publication.
 MIT. See [LICENSE](./LICENSE).
 
 ## Version Notes
+
+### 0.24.0
+
+- Added reviewed research source packs with source kind, claim, excerpt, confidence, and open risks.
+- Research source summaries now flow into task info, handoffs, snapshots, hidden context, and readiness warnings for upstream/parity work.
 
 ### 0.23.0
 

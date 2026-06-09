@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.0
+
+- Added research source packs with source kind, reviewed source, claim, excerpt, confidence, related risks, and separate `research/source-packs.json` persistence.
+- Research summaries now surface findings, risks, source-pack confidence, and reviewed sources in notes, info, handoff, snapshots, and hidden context.
+- Upstream/parity tasks now get a readiness warning when no reviewed research source pack exists, without blocking finish.
+- Added `/research:add-source` and `/research:summary` commands for review-first research evidence capture.
+
 ## 0.23.0
 
 - Added verification policy matrix rows that compare inferred touched-file categories with suggested project checks.

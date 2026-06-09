@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { ActiveTaskScope, AutoSubtaskMode, ClarificationAxis, ClarificationState, SubtaskPlanTemplate, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
+import type { ActiveTaskScope, AutoSubtaskMode, ClarificationAxis, ClarificationState, ResearchConfidence, ResearchSourceKind, SubtaskPlanTemplate, TaskRoleId, TaskRoleStatus, TaskState } from "./core";
 import {
   advancePlan,
   addTaskResearchNote,
+  addTaskResearchSourcePack,
   answerTaskClarification,
   applySubtaskPlan,
   applySpecProposal,
@@ -664,6 +665,23 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("research:summary", {
+    description: "Show Project Flow research source packs and notes for a task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await getTaskFromArgsOrActive(root, args, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No matching Project Flow task. Use /task:list to inspect tasks.", "warning");
+        return;
+      }
+      const research = await readTaskResearch(root, task.id);
+      ctx.ui.notify(
+        [`Research summary for ${task.id}:`, research ? formatResearchSummary(research, 12) : "No research artifact recorded yet."].join("\n"),
+        "info",
+      );
+    },
+  });
+
   pi.registerCommand("research:add", {
     description: "Add a research note to the active Project Flow task",
     handler: async (args, ctx) => {
@@ -681,6 +699,29 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       const research = await addTaskResearchNote(root, task.id, note);
       if (!research) {
         ctx.ui.notify(`Could not update research for ${task.id}.`, "warning");
+        return;
+      }
+      ctx.ui.notify(formatResearchSummary(research, 8), "info");
+    },
+  });
+
+  pi.registerCommand("research:add-source", {
+    description: "Add a reviewed research source pack to the active Project Flow task",
+    handler: async (args, ctx) => {
+      const root = await findProjectRoot(ctx.cwd);
+      const task = await loadActiveTask(root, activeTaskScopeFromContext(ctx));
+      if (!task) {
+        ctx.ui.notify("No active Project Flow task. Use /task:new or /task:switch first.", "warning");
+        return;
+      }
+      const parsed = parseResearchSourceArgs(args);
+      if (!parsed.source || !parsed.claim) {
+        ctx.ui.notify("Usage: /research:add-source --source <path-or-url> --claim <claim> [--excerpt <text>] [--confidence low|medium|high] [--kind doc|code|upstream|user|command|web] [--risk <risk>]", "warning");
+        return;
+      }
+      const research = await addTaskResearchSourcePack(root, task.id, parsed);
+      if (!research) {
+        ctx.ui.notify(`Could not update research sources for ${task.id}.`, "warning");
         return;
       }
       ctx.ui.notify(formatResearchSummary(research, 8), "info");
@@ -1499,6 +1540,53 @@ export default function projectFlowExtension(pi: ExtensionAPI) {
       queryParts.push(part);
     }
     return { action, query: queryParts.join(" "), note: noteParts.join(" ").trim() || undefined };
+  }
+
+  function parseResearchSourceArgs(args: string): { source: string; claim: string; excerpt?: string; confidence?: ResearchConfidence; kind?: ResearchSourceKind; openRisks?: string[] } {
+    const values = parseFlagValues(args);
+    const confidence = values.confidence && isResearchConfidenceArg(values.confidence) ? values.confidence : undefined;
+    const kind = values.kind && isResearchSourceKindArg(values.kind) ? values.kind : undefined;
+    const openRisks = [values.risk, values.risks].filter(Boolean).flatMap(value => value!.split(/\s*;\s*/).filter(Boolean));
+    return {
+      source: values.source || "",
+      claim: values.claim || "",
+      excerpt: values.excerpt,
+      confidence,
+      kind,
+      openRisks,
+    };
+  }
+
+  function parseFlagValues(args: string): Record<string, string> {
+    const tokens = tokenizeArgs(args);
+    const values: Record<string, string> = {};
+    let current: string | undefined;
+    for (const token of tokens) {
+      if (token.startsWith("--")) {
+        current = token.slice(2);
+        if (!values[current]) values[current] = "";
+        continue;
+      }
+      if (!current) continue;
+      values[current] = values[current] ? `${values[current]} ${token}` : token;
+    }
+    return values;
+  }
+
+  function tokenizeArgs(args: string): string[] {
+    const tokens: string[] = [];
+    for (const match of args.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
+      tokens.push(match[1] ?? match[2] ?? match[3] ?? "");
+    }
+    return tokens.filter(Boolean);
+  }
+
+  function isResearchConfidenceArg(value: string): value is ResearchConfidence {
+    return value === "low" || value === "medium" || value === "high";
+  }
+
+  function isResearchSourceKindArg(value: string): value is ResearchSourceKind {
+    return value === "doc" || value === "code" || value === "upstream" || value === "user" || value === "command" || value === "web";
   }
 
 

@@ -193,6 +193,9 @@ export interface TaskSnapshot {
   handoff?: string;
 }
 
+export type ResearchSourceKind = "doc" | "code" | "upstream" | "user" | "command" | "web";
+export type ResearchConfidence = "low" | "medium" | "high";
+
 export interface ResearchItem {
   id: string;
   timestamp: string;
@@ -201,13 +204,38 @@ export interface ResearchItem {
   details?: string;
 }
 
+export interface ResearchSourcePack {
+  id: string;
+  kind: ResearchSourceKind;
+  source: string;
+  reviewedAt: string;
+  claim: string;
+  excerpt: string;
+  confidence: ResearchConfidence;
+  openRisks: string[];
+  relatedItemIds: string[];
+}
+
+export interface ResearchSourceInput {
+  kind?: ResearchSourceKind;
+  source: string;
+  claim: string;
+  excerpt?: string;
+  confidence?: ResearchConfidence;
+  openRisks?: string[];
+  relatedItemIds?: string[];
+}
+
 export interface ResearchState {
   taskId: string;
   updatedAt: string;
   generatedFrom?: string;
   openQuestions: string[];
   decisions: string[];
+  findings: string[];
+  openRisks: string[];
   items: ResearchItem[];
+  sourcePacks: ResearchSourcePack[];
 }
 
 export type ClarificationStatus = "not_required" | "collecting" | "ready" | "skipped";
@@ -1435,13 +1463,20 @@ export async function readTaskResearch(root: string, taskId: string): Promise<Re
   try {
     const parsed = JSON.parse(await readFile(researchPath, "utf8")) as Partial<ResearchState>;
     if (typeof parsed.taskId !== "string" || typeof parsed.updatedAt !== "string") return undefined;
+    const sourcePacks = mergeResearchSourcePacks(
+      Array.isArray(parsed.sourcePacks) ? parsed.sourcePacks.filter(isResearchSourcePack) : [],
+      await readResearchSourcePacksFile(root, taskId),
+    );
     return {
       taskId: parsed.taskId,
       updatedAt: parsed.updatedAt,
       generatedFrom: typeof parsed.generatedFrom === "string" ? parsed.generatedFrom : undefined,
-      openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions.filter(item => typeof item === "string") : [],
-      decisions: Array.isArray(parsed.decisions) ? parsed.decisions.filter(item => typeof item === "string") : [],
+      openQuestions: normalizeStringArray(parsed.openQuestions),
+      decisions: normalizeStringArray(parsed.decisions),
+      findings: normalizeStringArray(parsed.findings),
+      openRisks: normalizeStringArray(parsed.openRisks),
       items: Array.isArray(parsed.items) ? parsed.items.filter(isResearchItem) : [],
+      sourcePacks,
     };
   } catch {
     return undefined;
@@ -1725,7 +1760,47 @@ export async function addTaskResearchNote(
     timestamp: now,
     data: { id, source, summary: state.items.at(-1)?.summary },
   });
-  await writeTaskInfo(root, task, "research_added");
+  await writeTaskInfo(root, task, "research_added", { force: true });
+  return state;
+}
+
+export async function addTaskResearchSourcePack(
+  root: string,
+  taskId: string,
+  input: ResearchSourceInput,
+): Promise<ResearchState | undefined> {
+  const task = await loadTask(root, taskId);
+  if (!task) return undefined;
+  const source = input.source.trim();
+  const claim = input.claim.trim();
+  if (!source || !claim) return readTaskResearch(root, taskId);
+  const now = new Date().toISOString();
+  const existing = await readTaskResearch(root, taskId);
+  const state = existing || createResearchState(taskId, [], now, "created_from_source_pack");
+  const pack: ResearchSourcePack = {
+    id: `S${state.sourcePacks.length + 1}`,
+    kind: input.kind || inferResearchSourceKind(source),
+    source,
+    reviewedAt: now,
+    claim,
+    excerpt: (input.excerpt || claim).trim(),
+    confidence: input.confidence || "medium",
+    openRisks: dedupeStrings(input.openRisks || []).slice(0, 8),
+    relatedItemIds: dedupeStrings(input.relatedItemIds || []).slice(0, 8),
+  };
+  state.sourcePacks.push(pack);
+  state.findings = dedupeStrings([...state.findings, claim]);
+  if (pack.openRisks.length > 0) state.openRisks = dedupeStrings([...state.openRisks, ...pack.openRisks]);
+  state.updatedAt = now;
+  state.generatedFrom = "research_source_pack";
+  await writeResearchFiles(root, task, state);
+  await appendTaskEvent(root, task.id, {
+    type: "research_source_added",
+    timestamp: now,
+    data: { id: pack.id, kind: pack.kind, source: pack.source, confidence: pack.confidence, claim: pack.claim },
+  });
+  await writeTaskInfo(root, task, "research_source_added", { force: true });
+  await writeTaskHandoff(root, task, "research_source_added");
   return state;
 }
 
@@ -4183,7 +4258,8 @@ export async function writeTaskHandoff(root: string, task: TaskState, reason = "
   const plan = await readPlan(root, task.id);
   const strategy = await readVerificationStrategy(root, task.id);
   const clarification = await readTaskClarification(root, task.id);
-  const content = formatTaskHandoff(task, verification, acceptance, plan, strategy, clarification, reason);
+  const research = await readTaskResearch(root, task.id);
+  const content = formatTaskHandoff(task, verification, acceptance, plan, strategy, clarification, research, reason);
   await writeFile(path.join(taskDir, "handoff.md"), content, "utf8");
   await writeTaskInfo(root, task, reason);
   await writeTaskResume(root, task, reason);
@@ -5108,7 +5184,10 @@ function createResearchState(
     generatedFrom,
     openQuestions: openQuestions.filter(item => item && item !== "None captured from the initial request."),
     decisions: [],
+    findings: [],
+    openRisks: [],
     items: [],
+    sourcePacks: [],
   };
 }
 
@@ -5127,6 +5206,7 @@ async function writeResearchFiles(root: string, task: TaskState, state: Research
   const researchDir = path.join(getProjectPaths(root).tasksDir, task.id, "research");
   await mkdir(researchDir, { recursive: true });
   await writeFile(path.join(researchDir, "research.json"), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(path.join(researchDir, "source-packs.json"), `${JSON.stringify({ taskId: state.taskId, updatedAt: state.updatedAt, sourcePacks: state.sourcePacks }, null, 2)}\n`, "utf8");
   await writeFile(path.join(researchDir, "notes.md"), formatResearchNotes(task, state), "utf8");
 }
 
@@ -5143,9 +5223,21 @@ function formatResearchNotes(task: TaskState, state: ResearchState): string {
     "",
     formatResumeList(state.openQuestions, "No open research questions recorded."),
     "",
+    "## Findings",
+    "",
+    formatResumeList(state.findings, "No research findings recorded."),
+    "",
     "## Decisions",
     "",
     formatResumeList(state.decisions, "No research decisions recorded."),
+    "",
+    "## Open Risks",
+    "",
+    formatResumeList(state.openRisks, "No open research risks recorded."),
+    "",
+    "## Source Packs",
+    "",
+    state.sourcePacks.length === 0 ? "No research source packs recorded yet." : state.sourcePacks.map(formatResearchSourcePack).join("\n\n"),
     "",
     "## Items",
     "",
@@ -5155,14 +5247,41 @@ function formatResearchNotes(task: TaskState, state: ResearchState): string {
 }
 
 export function formatResearchSummary(state: ResearchState, max = 8): string {
+  const confidence = summarizeResearchConfidence(state.sourcePacks);
   return [
     `research items: ${state.items.length}`,
+    `source packs: ${state.sourcePacks.length}${confidence ? ` (${confidence})` : ""}`,
+    `findings: ${state.findings.length}`,
     `open questions: ${state.openQuestions.length}`,
+    `open risks: ${state.openRisks.length}`,
     `decisions: ${state.decisions.length}`,
+    state.sourcePacks.length > 0 ? ["source packs:", ...state.sourcePacks.slice(-max).map(item => `- ${item.id}: ${item.kind} ${item.source} [${item.confidence}] ${item.claim}`)].join("\n") : "source packs: none",
     state.items.length > 0 ? ["recent research:", ...state.items.slice(-max).map(item => `- ${item.id}: ${item.summary}`)].join("\n") : "recent research: none",
   ].join("\n");
 }
 
+function formatResearchSourcePack(pack: ResearchSourcePack): string {
+  return [
+    `### ${pack.id}: ${pack.claim}`,
+    "",
+    `- kind: ${pack.kind}`,
+    `- source: ${pack.source}`,
+    `- reviewed: ${pack.reviewedAt}`,
+    `- confidence: ${pack.confidence}`,
+    pack.relatedItemIds.length > 0 ? `- related items: ${pack.relatedItemIds.join(", ")}` : undefined,
+    pack.openRisks.length > 0 ? `- open risks: ${pack.openRisks.join("; ")}` : undefined,
+    "",
+    pack.excerpt,
+  ].filter(line => line !== undefined).join("\n");
+}
+
+function summarizeResearchConfidence(sourcePacks: ResearchSourcePack[]): string {
+  if (sourcePacks.length === 0) return "";
+  const high = sourcePacks.filter(pack => pack.confidence === "high").length;
+  const medium = sourcePacks.filter(pack => pack.confidence === "medium").length;
+  const low = sourcePacks.length - high - medium;
+  return `high ${high}, medium ${medium}, low ${low}`;
+}
 function formatResearchItem(item: ResearchItem): string {
   return [
     `### ${item.id}: ${item.summary}`,
@@ -5259,6 +5378,65 @@ function isResearchItem(value: unknown): value is ResearchItem {
     typeof record.summary === "string" &&
     (record.source === undefined || typeof record.source === "string") &&
     (record.details === undefined || typeof record.details === "string");
+}
+
+function isResearchSourcePack(value: unknown): value is ResearchSourcePack {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.id === "string" &&
+    isResearchSourceKind(record.kind) &&
+    typeof record.source === "string" &&
+    typeof record.reviewedAt === "string" &&
+    typeof record.claim === "string" &&
+    typeof record.excerpt === "string" &&
+    isResearchConfidence(record.confidence) &&
+    Array.isArray(record.openRisks) && record.openRisks.every(item => typeof item === "string") &&
+    Array.isArray(record.relatedItemIds) && record.relatedItemIds.every(item => typeof item === "string");
+}
+
+function isResearchSourceKind(value: unknown): value is ResearchSourceKind {
+  return value === "doc" || value === "code" || value === "upstream" || value === "user" || value === "command" || value === "web";
+}
+
+function isResearchConfidence(value: unknown): value is ResearchConfidence {
+  return value === "low" || value === "medium" || value === "high";
+}
+
+function inferResearchSourceKind(source: string): ResearchSourceKind {
+  const normalized = source.trim().toLowerCase();
+  if (/^https?:\/\//.test(normalized)) return "web";
+  if (/\b(ecc|omo|trellis|superpowers|upstream)\b/.test(normalized) || normalized.includes("upstreams/")) return "upstream";
+  if (/\.(ts|tsx|js|jsx|py|rs|go|cs|java|cpp|c|h)(?::|$)/.test(normalized) || normalized.startsWith("src/") || normalized.startsWith("tests/")) return "code";
+  if (/\.(md|mdx|rst|txt)(?::|$)/.test(normalized) || normalized.startsWith("docs/")) return "doc";
+  if (/\b(bash|shell|bun|npm|pnpm|cargo|go test)\b/.test(normalized)) return "command";
+  return "user";
+}
+
+async function readResearchSourcePacksFile(root: string, taskId: string): Promise<ResearchSourcePack[]> {
+  const sourcePacksPath = path.join(getProjectPaths(root).tasksDir, taskId, "research", "source-packs.json");
+  if (!(await pathExists(sourcePacksPath))) return [];
+  try {
+    const parsed = JSON.parse(await readFile(sourcePacksPath, "utf8")) as unknown;
+    const candidate = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).sourcePacks)
+      ? (parsed as Record<string, unknown>).sourcePacks
+      : [];
+    return candidate.filter(isResearchSourcePack);
+  } catch {
+    return [];
+  }
+}
+
+function mergeResearchSourcePacks(primary: ResearchSourcePack[], secondary: ResearchSourcePack[]): ResearchSourcePack[] {
+  const seen = new Set<string>();
+  const result: ResearchSourcePack[] = [];
+  for (const pack of [...primary, ...secondary]) {
+    if (seen.has(pack.id)) continue;
+    seen.add(pack.id);
+    result.push(pack);
+  }
+  return result;
 }
 
 function createAcceptanceState(prd: ReturnType<typeof extractPrd>, now: string): AcceptanceState {
@@ -5559,6 +5737,7 @@ function formatTaskHandoff(
   plan: PlanState,
   strategy: VerificationStrategy,
   clarification: ClarificationState | undefined,
+  research: ResearchState | undefined,
   reason: string,
 ): string {
   const lastCheck = verification.checks.at(-1);
@@ -5608,6 +5787,10 @@ function formatTaskHandoff(
     "## Verification Suggestions",
     "",
     formatVerificationSuggestions(strategy, 8),
+    "",
+    "## Research",
+    "",
+    research ? formatResearchSummary(research, 6) : "No research artifact recorded yet.",
     "",
     "## Next Step",
     "",
@@ -6171,14 +6354,28 @@ function formatSnapshotVerification(verification: VerificationState): string {
   ).join("\n");
 }
 
+function taskNeedsResearchSourcePack(task: TaskState): boolean {
+  const metadata = task.metadata;
+  const text = [
+    task.title,
+    task.initialPrompt,
+    task.lastPrompt,
+    metadata?.kind,
+    metadata?.source,
+    ...(metadata?.labels || []),
+  ].filter(Boolean).join(" ").toLowerCase();
+  return /\b(upstream|parity|trellis|everything claude code|ecc|oh my openagent|omo|superpowers)\b/.test(text) || /(上游|同等|参考)/.test(text);
+}
+
 async function buildReadinessState(root: string, task: TaskState, reason: string): Promise<ReadinessState> {
   const currentTask = await loadTask(root, task.id) || task;
-  const [acceptance, verification, plan, clarification, strategy] = await Promise.all([
+  const [acceptance, verification, plan, clarification, strategy, research] = await Promise.all([
     readAcceptance(root, currentTask.id),
     readVerification(root, currentTask.id),
     readPlan(root, currentTask.id),
     readTaskClarification(root, currentTask.id),
     readVerificationStrategy(root, currentTask.id),
+    readTaskResearch(root, currentTask.id),
   ]);
   const blockers: string[] = [];
   const warnings: string[] = [];
@@ -6243,6 +6440,14 @@ async function buildReadinessState(root: string, task: TaskState, reason: string
   if (strategy.policy.coverageGaps.length > 0 && verification.checks.length > 0) {
     warnings.push(`${strategy.policy.coverageGaps.length} verification coverage gap(s) remain.`);
     nextActions.push(...strategy.policy.coverageGaps.slice(0, 4));
+  }
+  if (taskNeedsResearchSourcePack(currentTask)) {
+    if (!research || research.sourcePacks.length === 0) {
+      warnings.push("No reviewed research source pack recorded for upstream/parity work.");
+      nextActions.push("Add a reviewed source with /research:add-source before final review.");
+    } else {
+      passes.push(`Research source packs recorded: ${research.sourcePacks.length}.`);
+    }
   }
 
   if (currentTask.counters.failedToolCalls > 0) {
@@ -6524,6 +6729,12 @@ function summarizeTaskEvent(event: TaskEvent): string {
     return `suggestions refreshed from ${sources}`;
   }
 
+  if (event.type === "research_source_added") {
+    const source = typeof data.source === "string" ? data.source : "source";
+    const confidence = typeof data.confidence === "string" ? ` [${data.confidence}]` : "";
+    return `source ${data.id || "pack"}: ${source}${confidence}`;
+  }
+
   if (event.type === "plan_step_updated") {
     return `${data.id || "step"} -> ${data.status || "updated"}${data.evidence ? ` (${summarizeUnknown(data.evidence, 160)})` : ""}`;
   }
@@ -6657,8 +6868,14 @@ function formatResearchContext(research: ResearchState, info?: string, max = 140
   const lines = [
     `- updated: ${research.updatedAt}`,
     `- items: ${research.items.length}`,
+    `- source packs: ${research.sourcePacks.length}${research.sourcePacks.length > 0 ? ` (${summarizeResearchConfidence(research.sourcePacks)})` : ""}`,
     research.openQuestions.length > 0 ? `- open questions: ${research.openQuestions.slice(0, 4).join("; ")}` : "- open questions: none recorded",
+    research.findings.length > 0 ? `- findings: ${research.findings.slice(0, 4).join("; ")}` : "- findings: none recorded",
+    research.openRisks.length > 0 ? `- open risks: ${research.openRisks.slice(0, 4).join("; ")}` : "- open risks: none recorded",
     research.decisions.length > 0 ? `- decisions: ${research.decisions.slice(0, 4).join("; ")}` : "- decisions: none recorded",
+    research.sourcePacks.length > 0
+      ? `- reviewed sources: ${research.sourcePacks.slice(-4).map(pack => `${pack.id} ${pack.source} [${pack.confidence}]`).join("; ")}`
+      : "- reviewed sources: none recorded",
     research.items.length > 0
       ? `- recent items: ${research.items.slice(-4).map(item => `${item.id} ${item.summary}`).join("; ")}`
       : "- recent items: none recorded",

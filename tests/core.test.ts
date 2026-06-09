@@ -6,6 +6,7 @@ import type { ClarificationAxis } from "../src/core";
 import {
   buildContextBundle,
   addTaskResearchNote,
+  addTaskResearchSourcePack,
   answerTaskClarification,
   applySpecProposal,
   applySubtaskPlan,
@@ -53,6 +54,7 @@ import {
   resolveSpecProposal,
   saveTask,
   setActiveTask,
+  setPlanStepStatus,
   skipTaskClarification,
   startTaskClarification,
   startPrdRefinement,
@@ -785,6 +787,63 @@ describe("project flow core", () => {
 
       const resume = await writeTaskResume(root, task, "test");
       expect(resume.verificationCoverageGaps).not.toContain("Run or record bun run check for source changes.");
+    });
+  });
+
+  test("persists research source packs and gates upstream parity readiness", async () => {
+    await withTempProject(async root => {
+      await ensureProject(root);
+      const task = await createTask(root, "implement parity research source packs\n- Acceptance: reviewed source packs exist");
+      await updateAcceptanceItem(root, task.id, "A1", "done", "covered by source pack test");
+      for (const stepId of ["P1", "P2", "P3", "P4"]) {
+        await setPlanStepStatus(root, task.id, stepId, "done", "test complete");
+      }
+      await recordVerification(root, task.id, {
+        id: "check-1",
+        timestamp: "2026-06-09T00:00:00.000Z",
+        toolName: "bash",
+        command: "bun test tests/core.test.ts",
+        success: true,
+      });
+
+      const warned = await writeTaskReadiness(root, task, "test");
+      expect(warned.blockers).not.toContain("No reviewed research source pack recorded for upstream/parity work.");
+      expect(warned.warnings).toContain("No reviewed research source pack recorded for upstream/parity work.");
+
+      const research = await addTaskResearchSourcePack(root, task.id, {
+        source: "docs/gaps.md:51-55",
+        claim: "Research artifacts need structured source packs and confidence tracking.",
+        excerpt: "Target behavior: add structured source packs, research questions, findings, decisions, confidence levels.",
+        confidence: "high",
+        openRisks: ["Still no autonomous research agent."],
+      });
+      expect(research?.sourcePacks[0]?.kind).toBe("doc");
+      expect(research?.sourcePacks[0]?.confidence).toBe("high");
+      expect(research?.findings).toContain("Research artifacts need structured source packs and confidence tracking.");
+
+      const sourcePackFile = await readFile(path.join(root, ".project-flow", "tasks", task.id, "research", "source-packs.json"), "utf8");
+      expect(sourcePackFile).toContain("docs/gaps.md:51-55");
+
+      const stored = await readTaskResearch(root, task.id);
+      expect(stored?.sourcePacks).toHaveLength(1);
+
+      const info = await readTaskInfo(root, task.id);
+      expect(info).toContain("source packs: 1");
+      expect(info).toContain("docs/gaps.md:51-55");
+
+      const handoff = await readTaskHandoff(root, task.id);
+      expect(handoff).toContain("## Research");
+      expect(handoff).toContain("docs/gaps.md:51-55");
+
+      const snapshot = await readTaskSnapshot(root, task.id);
+      expect(snapshot?.research?.sourcePacks[0]?.source).toBe("docs/gaps.md:51-55");
+
+      const bundle = await buildContextBundle(root, "continue parity research", task);
+      expect(bundle.content).toContain("source packs: 1");
+      expect(bundle.content).toContain("docs/gaps.md:51-55");
+
+      const ready = await writeTaskReadiness(root, task, "test");
+      expect(ready.warnings).not.toContain("No reviewed research source pack recorded for upstream/parity work.");
     });
   });
 
