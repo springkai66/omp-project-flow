@@ -1,103 +1,328 @@
-# Project Flow Gaps
+# Project Flow 相对 Trellis 的缺口清单
 
-This file records known gaps that are intentionally not implemented yet.
-It also records implemented areas that are useful but still below the depth of Trellis, ECC, OMO, or Superpowers.
+更新时间：2026-06-09
 
-## High Priority
+## 依据
 
-- Auto Subtask Planner
-  - Status: partial.
-  - Current behavior: Project Flow generates guarded subtask suggestions for complex root tasks, records deterministic complexity scoring in `subtasks/plan.json` and `subtasks/plan.md`, exposes `off`, `suggest`, and `auto` policy controls through the `autoSubtaskMode` plugin setting and `/task:subtasks --mode`, injects summaries into context/info/snapshots, and can apply suggestions through `/task:subtasks --apply` or automatic `auto` mode.
-  - Remaining gap: the planner is still deterministic rather than agent-assisted.
-  - Target behavior: support agent-assisted decomposition for large tasks, with role-aware child execution and stronger dependency ordering.
+本文件只记录 Project Flow 相对 Trellis 仍缺失、未闭环或只完成本地轻量版本的能力。旧版英文内容已移除。
 
-- Real research / implement / check agent orchestration
-  - Status: partial.
-  - Current behavior: Project Flow now generates `roles/` handoff packets for research, implement, and check roles, tracks role status through `/task:roles`, records owned artifacts / expected outputs / role-local checks, and injects summaries into task info, snapshots, and hidden context.
-  - Remaining gap: Project Flow still does not launch independent role-based agents automatically; role packets are executed by the main OMP session or manually launched agents.
-  - Target behavior: launch or coordinate independent role sessions when OMP exposes a safe runtime API, while preserving explicit state ownership, handoff artifacts, and check outputs.
+对照来源：
 
-- Automatic verification remediation loop
-  - Status: complete-local in 0.27.0; below autonomous self-fix parity only.
-  - Current behavior: Project Flow detects likely verification commands, records pass/fail checks, blocks premature finish when checks are missing or failing, supports an opt-in `/verify:remediate` loop, classifies failed checks with evidence/confidence/signals/impacted files, writes structured next-action records plus a remediation ledger, and keeps rerun/fix commands opt-in.
-  - Boundary: Project Flow does not automatically apply fixes, rerun commands, install dependencies, or launch hidden agents; it records reviewable next actions and stop reasons grounded in observed verification evidence.
-  - Target behavior: add safe self-fix execution policies only if the runtime exposes explicit user-controlled execution contracts and the task carries reviewed evidence for the policy.
+- Trellis `core-rules/skills/process-gate/SKILL.md`：预合并流程门禁，固定输出 `MERGEABLE / NEEDS CHANGES / BLOCKED`，并为每个非通过项给出定位和修复建议。
+- Trellis `core-rules/hooks.md`：三层钩子体系，包括 fast-local、heavy-gated、git-boundary。
+- Trellis `engineering-process.md`：工程流程总则，包括规则继承、注册项目、审计、Definition of Done、文档纪律和反馈闭环。
 
-## Medium Priority
+## 总体结论
 
-- Session-scoped active task
-  - Status: implemented in 0.20.0.
-  - Current behavior: `.project-flow/workflow/active-task-scopes.json` tracks per-session active task pointers keyed by OMP session identity, while `.project-flow/workflow/active-task.json` remains the project-level compatibility pointer.
-  - Boundary: session-aware commands and hooks use the current session scope; project-level active task lookup is retained for legacy/no-session contexts and explicit fallback callers.
+Project Flow 已经具备任务状态、验收项、计划、研究证据、PRD review、验证建议、验证失败分类、remediation next actions、handoff/resume/snapshot/context 等本地状态能力。
 
-- Interactive brainstorm PRD loop
-  - Status: implemented in 0.21.0.
-  - Current behavior: Project Flow supports `/prd:refine` and `/task:clarify --refine`, which run a focused one-question-at-a-time PRD refinement loop over required axes: goal, scope, users, acceptance, constraints, non-goals, verification, and risk. Answers update `clarification.json`, `clarification.md`, `prd.md`, hidden context, handoff, snapshots, and readiness.
-  - Boundary: refinement stays explicit and reviewable; Project Flow asks and records focused questions, but it does not invent unresolved product decisions or proceed past collecting mode until required axes are answered or skipped.
+但相对 Trellis，Project Flow 仍主要是“记录与提示系统”，不是“强制流程门禁系统”。Trellis 的核心优势在于：规则可执行、检查可阻塞、失败有固定 verdict、项目间可继承、git 边界可兜底、定期审计可把问题重新纳入治理闭环。
 
-- Deeper subtask tree planning
-  - Status: implemented in 0.22.0.
-  - Current behavior: Project Flow supports parent/child task relationships, `/task:child`, `/task:tree`, readiness rollups, subtask summaries, multi-child split templates, ordered subtask plan items, nested parent plan-item links, and tree rollups by status, phase, depth, leaves, truncation, and blocked subtasks.
-  - Boundary: planning remains deterministic and local to `.project-flow/`; Project Flow records reviewable child-task proposals instead of inventing hidden agents or executing child tasks automatically unless `autoSubtaskMode`/`--mode auto` explicitly applies the plan.
+## P0：最高优先级缺口
 
-## Implemented But Below Parity
+### 1. 预合并 process gate 尚未闭环
 
-- PRD / acceptance / plan artifacts
-  - Status: complete-local in 0.26.0; below autonomous design-review parity only.
-  - Current behavior: Project Flow writes `prd-review.json` and `prd-review.md` for each task with a structured PRD snapshot, decision log, completeness blockers/warnings, plan-quality checks, acceptance-to-plan coverage, verification coverage, and a promotion readiness state. The promotion summary flows into `info.md`, handoff, snapshots, hidden context, and finish readiness.
-  - Boundary: planning remains deterministic and local to `.project-flow/`; Project Flow records reviewable blockers and warnings but does not invent missing product decisions or launch hidden design-review agents.
-  - Target behavior: add richer interactive design review and agent-assisted planning only when the runtime exposes a safe, auditable agent/session contract.
+当前状态：
 
-- Research artifacts and `info.md`
-  - Status: complete-local in 0.25.0; external-blocked only for autonomous research-agent launch.
-  - Current behavior: each task can store `research/research.json`, `research/source-packs.json`, `research/notes.md`, `research/handoff.md`, and `info.md`; research records structured questions, findings, decisions, risks, reviewed/draft source packs, local file/range extraction, source confidence, freshness, and implementation/check handoff packets; summaries flow into context, handoff, snapshots, and spec proposals.
-  - Boundary: Project Flow intentionally does not claim autonomous research or silently fetch/diff remote upstream sources; reviewed evidence is explicit and local/agent/user controlled.
-  - Target behavior: add autonomous research-agent execution only if the runtime exposes a safe, auditable agent/session contract; keep review-first state ownership as the fallback.
+- Project Flow 可以记录验证命令、验收状态、计划状态和 finish readiness。
+- `/verify:remediate` 可以生成失败分类和可审阅 next actions。
+- 但这些能力主要服务于当前任务，不是完整的预合并门禁。
 
-- Handoff / resume / snapshot artifacts
-  - Status: implemented, below OMO/Superpowers depth.
-  - Current behavior: Project Flow writes compact handoff, resume, readiness, and snapshot artifacts for continuity.
-  - Gap: summaries are reliable enough for local use but do not yet model richer session history, branch/PR lifecycle, multi-agent ownership, or cross-session conflict resolution.
-  - Target behavior: add richer lifecycle state, ownership fields, stale-state detection, and clearer resume packs for long-running multi-session work.
+相对 Trellis 的缺口：
 
-- Context injection
-  - Status: implemented, below ECC/OMO depth.
-  - Current behavior: Project Flow injects task context, specs, clarification, research, readiness, snapshots, and upstream sync context into OMP agent prompts.
-  - Gap: context assembly is scored and bounded but lacks advanced routing, role-specific context packs, source prioritization policies, and token-budget-aware compression strategies.
-  - Target behavior: add role-specific context bundles, stronger relevance scoring, explicit token budgets, and source/category priority controls.
+- 没有等价的 process gate 命令或技能。
+- 没有固定的六类门禁：PR 卫生、密钥扫描、绕过标记、测试覆盖、文档纪律、栈特定检查。
+- 没有统一 verdict：`MERGEABLE / NEEDS CHANGES / BLOCKED`。
+- 没有为每个失败项输出稳定的 finding block：失败内容、位置、修复动作、是否允许人工接受 warning。
+- 没有把 warning 的人工接受记录到 PR 或任务说明中。
 
-- Task metadata
-  - Status: implemented, near parity as a foundation, below full orchestration use.
-  - Current behavior: task metadata records kind, source, priority, risk, labels, origin, relationships, related specs, custom values, branch, assignee, and PR URL.
-  - Gap: metadata is recorded and displayed, but not yet deeply used for scheduling, routing, agent assignment, branch/PR automation, or policy decisions.
-  - Target behavior: use metadata to drive active-task selection, subtask planning, verification policy, agent role assignment, and upstream sync prioritization.
+建议闭环：
 
-- Subtask tree
-  - Status: implemented, below Trellis depth.
-  - Current behavior: Project Flow supports manual child creation, parent/child relationships, tree display, readiness rollups, context/snapshot/info summaries, and reparent cleanup.
-  - Gap: deterministic suggested decomposition now exists, but there is no dependency ordering, per-child role assignment, and only limited large-tree rollups.
-  - Target behavior: add dependencies, ordering, richer batch creation controls, large-tree summaries, and role-aware child execution.
+- 新增本地 `/process:gate` 或 `/task:gate`。
+- 输出固定结构的门禁报告。
+- 将门禁结果写入任务目录，并进入 readiness、handoff、snapshot、hidden context。
+- 在未通过时阻止普通 finish，除非用户显式 force 并记录理由。
 
-- Verification suggestions and readiness blocking
-  - Status: implemented locally, below ECC/OMO/Superpowers autonomous execution depth.
-  - Current behavior: Project Flow detects likely verification commands, records verification events, blocks finish when checks are missing or failing, tracks opt-in remediation attempts with stop conditions and evidence, persists a verification policy matrix, classifies failed checks, and writes explicit next-action records without running commands silently.
-  - Gap: it does not enforce a user-defined verification matrix or execute the self-fix loop automatically.
-  - Target behavior: add configurable verification policies, richer rerun analysis, and safe self-fix integration only behind explicit user control.
+### 2. git-boundary 防线缺失
 
-- Upstream sync framework
-  - Status: implemented as a local enhancement, below automated upstream-intelligence depth.
-  - Current behavior: Project Flow tracks ECC and OMO as design sources, records capability coverage, and can create review-first upstream sync tasks.
-  - Gap: source review is manual; it does not yet fetch release notes, diff upstream capabilities, summarize new patterns, or map changes into proposed local tasks automatically.
-  - Target behavior: add reviewed-source snapshots, capability diffing, update summaries, and proposed implementation tasks while preserving review-first safety.
+当前状态：
 
-## Lower Priority
+- Project Flow 可以记录 git 相关工具调用。
+- 推送、提交、验证仍依赖用户或 agent 自觉执行。
 
-- Custom hooks / skills / agents / templates catalog
-  - Status: watch.
-  - Current behavior: Project Flow ships as one local OMP plugin with fixed commands and hooks.
-  - Target behavior: only add a catalog or marketplace-style module system if the plugin grows multiple optional modules that need versioned installation, discovery, and enable/disable controls.
+相对 Trellis 的缺口：
 
-- Richer upstream sync automation
-  - Status: partial.
-  - Current behavior: Project Flow tracks ECC and OMO as design sources and can create review-first upstream sync tasks.
-  - Target behavior: improve source review artifacts, change summaries, capability diffs, and suggested implementation tasks without automatically fetching, executing, or merging upstream code.
+- 没有 pre-commit、commit-msg、pre-push 的本地兜底策略。
+- 没有阻止直接推送到 `main` / `master` 的策略。
+- 没有检测 `--no-verify`、force push、hard reset 等绕过行为的持久审计。
+- 没有在 push 前自动运行合并级 gate。
+- 没有把 git 边界失败转成 Project Flow 可追踪的 finding。
+
+建议闭环：
+
+- 先实现 Project Flow 内部的 git 边界报告，不直接安装 hooks。
+- 明确列出建议 hook、风险、触发条件和检测结果。
+- 后续如要安装真实 git hooks，必须由用户显式命令触发。
+
+### 3. Stop-time 强制验证未闭环
+
+当前状态：
+
+- Project Flow 可以推断验证命令并记录 pass/fail。
+- finish readiness 会在没有验证或最新验证失败时阻塞。
+
+相对 Trellis 的缺口：
+
+- 没有 turn 结束时自动执行 Todo 检查、typecheck、lint、test 的 stop gate。
+- 没有固定顺序的验证流水线。
+- 没有按失败类型切片输出：typecheck/lint 取前部错误，test 取尾部断言。
+- 没有预算上限、子目录作用域推断、monorepo 子树执行策略。
+- 没有“打开的 todo 必须完成、放弃或说明原因”的强约束。
+
+建议闭环：
+
+- 在 Project Flow 中实现可审阅的 stop-check 计划和 receipt 检查。
+- 如 OMP runtime 支持安全 Stop hook，再接入自动阻塞。
+- 在没有 runtime hook 前，保持为本地显式命令，避免伪装自动执行。
+
+### 4. Fast-local 反馈钩子未闭环
+
+当前状态：
+
+- Project Flow 通过工具事件记录 touched files。
+- 没有对单次编辑立即做 per-file lint 或危险命令拦截。
+
+相对 Trellis 的缺口：
+
+- 没有 `block-destructive` 等价能力。
+- 没有编辑后单文件 lint。
+- 没有大输出或截断结果的即时提示策略。
+- 没有 fast-local 与 heavy-gated 的分层预算。
+
+建议闭环：
+
+- 先实现本地策略矩阵：危险命令、敏感文件、单文件 lint、输出截断。
+- 再根据 OMP 暴露的 tool hook 能力决定是否升级成真正阻塞钩子。
+
+## P1：高优先级缺口
+
+### 5. Definition of Done receipt 不完整
+
+当前状态：
+
+- Project Flow 记录验证事件、验收证据和 finish readiness。
+- 已有任务 journal、handoff、snapshot。
+
+相对 Trellis 的缺口：
+
+- 没有统一 receipt marker，无法稳定表达命令、退出码和 diff 规模。
+- 没有要求每次“完成”都携带可机器读取的 receipt。
+- 没有把 receipt 与 finish gate、PR gate、验证记录统一起来。
+
+建议闭环：
+
+- 为 Project Flow 定义本地 receipt schema。
+- 将最新有效 receipt 纳入 finish readiness。
+- 对缺少 receipt 的完成动作给出 blocker 或 warning。
+
+### 6. 规则继承与跨项目漂移审计缺失
+
+当前状态：
+
+- Project Flow 有 `.project-flow/spec/` 和 spec proposals。
+- 规则主要在单仓库内生效。
+
+相对 Trellis 的缺口：
+
+- 没有父规则 / 子规则继承机制。
+- 没有注册项目列表和临时豁免列表。
+- 没有 parent-hook-drift 或 cross-project-process-audit。
+- 没有“规则三次出现后提升为父规则”的治理流程。
+
+建议闭环：
+
+- 先实现单仓库内的规则漂移检查和 spec proposal 升级流程。
+- 后续再支持多项目 registry，不默认扫描用户其他仓库。
+
+### 7. 项目本地 stack profile 与可配置 gate 缺失
+
+当前状态：
+
+- Project Flow 可以根据 `package.json`、`Cargo.toml` 等推断验证建议。
+- 验证策略矩阵已可记录覆盖状态。
+
+相对 Trellis 的缺口：
+
+- 没有 `local.config` 等价配置。
+- 没有按项目声明 test/typecheck/lint 命令、PR 大小阈值、栈特定 validators。
+- 没有 stack profile：web、native、Unity、n/a 等。
+- 没有区分 canonical gates 和项目本地扩展 gates。
+
+建议闭环：
+
+- 增加 Project Flow verification/process policy 配置文件。
+- 保持默认推断，但允许用户显式声明。
+- 配置必须进入 readiness 与 gate 报告，避免静默失效。
+
+### 8. 代码审查与 UI 验证未闭环
+
+当前状态：
+
+- Project Flow 有 role handoff，可记录 check role。
+- 没有真正的自动 code review gate 或 UI screenshot gate。
+
+相对 Trellis 的缺口：
+
+- 没有 edit-heavy diff 触发的 code-review reviewer ladder。
+- 没有 critical finding 阻塞策略。
+- 没有 UI 文件变更后的 dev server 检查和截图 artifact。
+- 没有“尝试失败 advisory、尝试后无 artifact 才 block”的细粒度决策表。
+
+建议闭环：
+
+- 先实现 review-plan 和 ui-verify-plan artifact。
+- 只有在工具可用且用户同意时执行截图或 reviewer。
+- 将 findings 和 artifacts 纳入 readiness。
+
+### 9. 定期审计与反馈回路不足
+
+当前状态：
+
+- Project Flow 有 upstream sync report 和 research artifacts。
+- 没有定期审计任务体系。
+
+相对 Trellis 的缺口：
+
+- 没有 weekly/monthly audits。
+- 没有 gotchas rollup。
+- 没有 bypass tripwire。
+- 没有 drift audit。
+- 没有把重复问题提升成规则候选的流程。
+
+建议闭环：
+
+- 增加本地 audit proposal artifacts。
+- 先让用户显式触发 `/audit:run` 或 `/audit:plan`。
+- 不自动扫描仓库外路径，不自动创建跨项目任务。
+
+## P2：中优先级缺口
+
+### 10. Session context 与 context-log 闭环不足
+
+当前状态：
+
+- Project Flow 有 handoff、resume、snapshot 和 hidden context。
+- active task 已支持 session-scoped 指针。
+
+相对 Trellis 的缺口：
+
+- 没有等价的 SessionStart context 注入：分支、最近提交、dirty file count、未解决 gotchas。
+- 没有 compact 前保存 session context log 的 hook。
+- 没有 compact 后恢复 context log 的 hook。
+- 没有跨 worktree 的 canonical root context-log 策略。
+
+建议闭环：
+
+- 复用现有 handoff/resume/snapshot。
+- 增加更明确的 session context log artifact。
+- 在 OMP 支持 session lifecycle hook 前，不声称自动注入。
+
+### 11. 多 harness 覆盖不足
+
+当前状态：
+
+- Project Flow 是 OMP 插件。
+- 文档中记录了上游来源，但没有多 harness 部署。
+
+相对 Trellis 的缺口：
+
+- 没有 Claude Code / Codex / AntiGravity 的规则、技能、命令、hook 覆盖矩阵。
+- 没有不同 harness envelope 的分离实现。
+- 没有 AntiGravity 仅 advisory、Claude/Codex 可 block 的策略表达。
+
+建议闭环：
+
+- 先在文档和 upstream sync capability 中记录 harness 差异。
+- 不为未接入的 harness 生成配置文件。
+
+### 12. 上游同步仍未形成完整智能闭环
+
+当前状态：
+
+- Project Flow 记录 ECC 和 OMO 作为设计来源。
+- 可以生成 upstream sync report 和 review-first 任务。
+
+相对 Trellis 的缺口：
+
+- 没有 reviewed upstream snapshot。
+- 没有 capability diff。
+- 没有把上游变化映射成可审阅实现提案。
+- 没有记录 source freshness、confidence、evidence excerpt、local status mapping 的完整闭环。
+
+建议闭环：
+
+- 当前下一步可以优先实现 reviewed source snapshots 与 capability diff proposals。
+- 该能力会降低后续“参考 Trellis 实现”的研究成本。
+
+### 13. 子任务与角色编排仍偏提示，不是执行闭环
+
+当前状态：
+
+- Project Flow 可以生成 subtask suggestions、child tasks、role handoff packets。
+- 能记录 role status 和 expected outputs。
+
+相对 Trellis 的缺口：
+
+- 没有自动 dispatch 独立 agent。
+- 没有 role 执行结果的强制验收门禁。
+- 没有子任务依赖顺序和阻塞传播策略达到 Trellis process gate 级别。
+
+建议闭环：
+
+- 在 OMP 暴露安全 agent/session API 前，保持为显式、可审阅、手动启动。
+- 增加 dependency 和 per-role receipt 后再考虑自动执行。
+
+## 已接近闭环但仍低于 Trellis 强制性的能力
+
+### 研究证据与 PRD/计划审查
+
+已完成：
+
+- research source packs、questions、findings、decisions、risks。
+- PRD review、plan quality、acceptance coverage、verification coverage。
+- summaries 进入 info、handoff、snapshot、hidden context、readiness。
+
+仍低于 Trellis：
+
+- 没有 scheduled audit。
+- 没有跨项目规则提升。
+- 没有强制 process gate。
+
+### 验证失败分类与 remediation next actions
+
+已完成：
+
+- 失败分类、证据、confidence、signals、impacted files、retryability、stop reason。
+- next-action records 和 remediation ledger。
+- `/verify:remediate --next`。
+
+仍低于 Trellis：
+
+- 不自动执行 Stop hook。
+- 不自动运行 typecheck/lint/test。
+- 不作为 git-boundary gate 阻塞 push。
+
+## 当前推荐开发顺序
+
+1. 先补 upstream reviewed snapshots 与 capability diff proposals，减少后续参考 Trellis 时的重复研究成本。
+2. 再补 process gate 的本地报告与 readiness 阻塞。
+3. 再补 configurable verification/process policy。
+4. 最后在 OMP runtime 支持安全 hook 或 agent session 后，接入真正的阻塞式 stop gate、fast-local gate 和角色执行闭环。
+
+## 明确边界
+
+- 不自动安装 git hooks。
+- 不自动扫描仓库外项目。
+- 不自动执行上游代码。
+- 不静默推送、force push 或绕过验证。
+- 未有 OMP runtime 能力前，不声称实现 Trellis 等价的强制 hook 系统。
